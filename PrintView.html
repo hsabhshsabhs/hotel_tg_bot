@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <style>
+    /* Настройки страницы для принтера */
+    @page { 
+      size: A4 landscape; 
+      margin: 10mm; 
+    }
+    
+    body { 
+      font-family: "Arial", sans-serif; 
+      font-size: 12px; 
+      color: #000; 
+      margin: 0; 
+      padding: 10px; 
+      max-width: 100%;
+    }
+
+    /* Шапка документа */
+    .header-section {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      font-size: 14px;
+      border-bottom: 2px solid black;
+      padding-bottom: 5px;
+    }
+
+    h1 { 
+      font-size: 18px; 
+      margin: 15px 0; 
+      text-transform: uppercase; 
+      text-align: center; 
+      width: 100%; 
+      font-weight: bold;
+    }
+    
+    /* Таблица */
+    table { 
+      width: 100%; 
+      border-collapse: collapse; 
+      margin-bottom: 20px; 
+    }
+    
+    th, td { 
+      border: 1px solid black; 
+      padding: 4px; 
+      text-align: center; 
+      vertical-align: middle;
+    }
+
+    th { 
+      background-color: #f0f0f0; 
+      font-weight: bold; 
+      font-size: 11px;
+    }
+
+    /* Настройки ширины колонок */
+    .col-num { width: 30px; }
+    .col-name { width: 20%; text-align: left; }
+    .col-zone { width: 15%; }
+    .col-unit { width: 40px; }
+    .col-val { width: 40px; font-size: 11px; }
+
+    .work-row td { height: 30px; }
+    
+    /* Стиль данных внутри ячеек */
+    .fact-value { font-style: italic; }
+    .plan-value { font-weight: bold; }
+
+    /* Блок подписей */
+    .signatures { 
+      display: flex; 
+      justify-content: space-between; 
+      margin-top: 80px; /* Увеличенный отступ сверху */
+      padding: 0 50px;
+    }
+    
+    .sig-block { 
+      width: 40%; 
+      border-top: 1px solid black; 
+      padding-top: 10px; 
+      text-align: center; 
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* Кнопка печати (скрывается при печати) */
+    @media print {
+      .no-print { display: none !important; }
+    }
+    
+    .print-wrapper {
+        text-align: center;
+        margin-top: 50px;
+        margin-bottom: 50px;
+    }
+
+    .print-btn { 
+      padding: 15px 40px; 
+      background: #007bff; 
+      color: white; 
+      border: none; 
+      border-radius: 5px; 
+      cursor: pointer; 
+      font-family: sans-serif; 
+      font-size: 16px;
+      font-weight: bold;
+      box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+      transition: background 0.2s;
+    }
+    .print-btn:hover { background: #0056b3; }
+  </style>
+</head>
+<body>
+  
+  <!-- Скрипт подготовки данных (Серверная часть) -->
+  <? 
+    var record = getPrintData(formId); 
+    var content = []; 
+    try { content = JSON.parse(record.content); } catch(e){} 
+
+    // 1. Вычисляем даты недели
+    var dateHeaders = [];
+    var startDate = null;
+    
+    if (record.target_monday) {
+        var parts = record.target_monday.split('.');
+        startDate = new Date(parts[2], parts[1]-1, parts[0]);
+    } else if (content.length > 0 && content[0].date) {
+        var parts = content[0].date.split('.');
+        var d = new Date(parts[2], parts[1]-1, parts[0]);
+        var day = d.getDay();
+        var diff = d.getDate() - day + (day == 0 ? -6 : 1);
+        startDate = new Date(d.setDate(diff));
+    } else {
+        startDate = new Date(); 
+    }
+
+    // Генерируем заголовки дат
+    for (var i = 0; i < 7; i++) {
+        var d = new Date(startDate);
+        d.setDate(startDate.getDate() + i);
+        var dd = ('0' + d.getDate()).slice(-2) + '.' + ('0' + (d.getMonth() + 1)).slice(-2);
+        dateHeaders.push(dd);
+    }
+
+    // 2. Группировка данных
+    var groupedData = {};
+    for (var i = 0; i < content.length; i++) {
+        var item = content[i];
+        var key = (item.workType || '') + '_' + (item.project || '') + '_' + (item.unit || '');
+        
+        if (!groupedData[key]) {
+            groupedData[key] = {
+                name: item.workType,
+                project: item.project,
+                unit: item.unit,
+                days: {} 
+            };
+        }
+        groupedData[key].days[item.date] = { plan: item.plan, fact: item.fact };
+    }
+  ?>
+
+  <!-- Контент страницы -->
+
+  <div class="header-section">
+    <div><b>Наименование подразделения:</b> <?= record.contractor ?></div>
+    <div style="text-align: right;"><b>Период:</b> с <?= dateHeaders[0] + '.' + startDate.getFullYear() ?> по <?= dateHeaders[6] + '.' + startDate.getFullYear() ?></div>
+  </div>
+
+  <h1>Недельно-суточное задание</h1>
+
+  <table>
+    <thead>
+      <!-- Шапка 1: Дни недели -->
+      <tr>
+        <th rowspan="2" class="col-num">№</th>
+        <th rowspan="2" class="col-name">Наименование работ</th>
+        <th rowspan="2" class="col-zone">Зона работ (Проект)</th>
+        <th rowspan="2" class="col-unit">Ед.<br>изм.</th>
+        
+        <? for (var d = 0; d < 7; d++) { ?>
+          <th colspan="2">Задание на <?= dateHeaders[d] ?></th>
+        <? } ?>
+      </tr>
+      
+      <!-- Шапка 2: План/Факт -->
+      <tr>
+        <? for (var d = 0; d < 7; d++) { ?>
+          <th class="col-val">План</th>
+          <th class="col-val">Факт</th>
+        <? } ?>
+      </tr>
+    </thead>
+    
+    <tbody>
+      <? 
+         var rowIndex = 1;
+         var keys = Object.keys(groupedData);
+         
+         if (keys.length === 0) { 
+      ?>
+        <tr><td colspan="18" style="padding: 20px;">Нет данных для отображения</td></tr>
+      <? 
+         } else {
+           for (var k = 0; k < keys.length; k++) {
+             var row = groupedData[keys[k]];
+      ?>
+        <tr class="work-row">
+          <td><?= rowIndex++ ?></td>
+          <td style="text-align: left; padding-left: 5px;"><?= row.name ?></td>
+          <td><?= row.project ?></td>
+          <td><?= row.unit ?></td>
+          
+          <? 
+             for (var d = 0; d < 7; d++) { 
+                var currentD = new Date(startDate);
+                currentD.setDate(startDate.getDate() + d);
+                var fullDateStr = ('0' + currentD.getDate()).slice(-2) + '.' + ('0' + (currentD.getMonth() + 1)).slice(-2) + '.' + currentD.getFullYear();
+                var dayData = row.days[fullDateStr] || { plan: '', fact: '' };
+          ?>
+            <td class="plan-value"><?= dayData.plan ?></td>
+            <td class="fact-value"><?= dayData.fact ?></td>
+          <? } ?>
+          
+        </tr>
+      <? 
+           } 
+         } 
+      ?>
+    </tbody>
+  </table>
+
+  <div class="signatures">
+    <div class="sig-block">
+      Представитель подрядчика <br>
+      <br>
+      _________________ / _________________
+    </div>
+    <div class="sig-block">
+      Представитель АО "Прокатмонтаж"<br>
+      <br>
+      _________________ / _________________
+    </div>
+  </div>
+
+  <!-- Кнопка печати ВНИЗУ -->
+  <div class="print-wrapper no-print">
+      <button class="print-btn" onclick="window.print()">🖨 Печать (Альбомная)</button>
+  </div>
+
+</body>
+</html>

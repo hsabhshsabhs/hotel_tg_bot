@@ -1,0 +1,26 @@
+# Telegram Bot
+python-telegram-bot==20.7
+
+# Google APIs
+google-api-python-client==2.111.0
+google-auth-httplib2==0.2.0
+google-auth-oauthlib==1.2.0
+google-generativeai==0.3.2
+
+# Image Processing
+Pillow==10.2.0
+
+# HTTP Requests
+requests==2.31.0
+
+# Environment Variables
+python-dotenv==1.0.0
+
+# Task Scheduling
+APScheduler==3.10.4
+
+# Date/Time utilities
+python-dateutil==2.8.2
+
+# Async support
+aiohttp==3.9.1

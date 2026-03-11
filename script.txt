@@ -1,0 +1,1080 @@
+// =================================================================
+// --- КОНФИГУРАЦИЯ ---
+// =================================================================
+const TELEGRAM_TOKEN = "8138965801:AAGD5pEYg9AbflVqtkqjmEpOrFQS8zNS76U";
+const DRIVE_FOLDER_ID = "1FHAPQWiQyhe-H45Iv_uDzNdmNJC5Bp5g";
+
+// Названия листов
+const SHEET_NAME_COMPLEX_QUESTIONS = "Вопросы к комплексу";
+const SHEET_NAME_HEADCOUNT = "Численность";
+const SHEET_NAME_TASKS = "Целевые задания";
+const SHEET_NAME_ACCESS = "Доступ";
+const SHEET_NAME_QUESTIONS = "Вопросы к заказчику";
+const SHEET_NAME_NSG = "НСЗ";
+const SHEET_NAME_COMPLEX_PROTOCOL = "Протокол комплекса строительства";
+const SHEET_NAME_PSD_LOG = "БД журнал ПСД";
+
+const TELEGRAM_URL = "https://api.telegram.org/bot" + TELEGRAM_TOKEN;
+const GEMINI_API_KEY = "AIzaSyDrWxIl3AI5vr-qOQ_IJn9xJvgqjea1F-Y"; 
+// =================================================================
+
+
+// =================================================================
+// --- ЛОГИРОВАНИЕ ---
+// =================================================================
+const SHEET_NAME_LOGS = "logsbot";
+
+function logToSheet(level, message) {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_LOGS);
+    if (sheet) {
+      const timestamp = new Date();
+      sheet.appendRow([timestamp, level, message]);
+    }
+  } catch (e) {
+    // Если логирование не удалось, выводим в стандартный логгер
+    Logger.log(`Failed to log to sheet: ${e.toString()}. Original log: [${level}] ${message}`);
+  }
+}
+
+
+// =================================================================
+// --- ОСНОВНЫЕ ФУНКЦИИ ---
+// =================================================================
+
+function setWebhook() {
+  const webAppUrl = ScriptApp.getService().getUrl();
+  const response = UrlFetchApp.fetch(TELEGRAM_URL + "/setWebhook?url=" + webAppUrl);
+  Logger.log(response.getContentText());
+  SpreadsheetApp.getUi().alert("Вебхук успешно установлен!");
+}
+
+function deleteWebhook() {
+  const response = UrlFetchApp.fetch(TELEGRAM_URL + "/deleteWebhook");
+  Logger.log(response.getContentText());
+}
+
+function doPost(e) {
+  try {
+    const contents = JSON.parse(e.postData.contents);
+    logToSheet("INFO", "Received update: " + JSON.stringify(contents));
+
+    if (contents.callback_query) {
+      handleCallback(contents.callback_query.from.id, contents.callback_query.data);
+    } else if (contents.message) {
+      if (contents.message.photo) {
+        handlePhotoMessage(contents.message.from.id, contents.message.photo);
+      } else {
+        handleTextMessage(contents.message.from.id, contents.message.text);
+      }
+    }
+  } catch (err) { 
+    logToSheet("ERROR", "ERROR in doPost: " + err.toString() + " | Stack: " + err.stack);
+    Logger.log("ERROR in doPost: " + err.toString()); 
+  }
+}
+
+// =================================================================
+// --- ГЛАВНЫЙ МАРШРУТИЗАТОР И АВТОРИЗАЦИЯ ---
+// =================================================================
+
+function getUserRole(chatId) {
+  try {
+    const accessSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_ACCESS);
+    if (!accessSheet) return "ПОДРЯДЧИК";
+    const data = accessSheet.getRange("B:B").getValues();
+    const telegramIds = data.map(row => String(row[0]));
+    return telegramIds.includes(String(chatId)) ? "ИНЖЕНЕР" : "ПОДРЯДЧИК";
+  } catch (e) { return "ПОДРЯДЧИК"; }
+}
+
+// --- ФУНКЦИЯ ОБРАБОТКИ ТЕКСТА ---
+function handleTextMessage(chatId, text) {
+  const userProperties = PropertiesService.getUserProperties();
+  let state = JSON.parse(userProperties.getProperty('state_' + chatId) || '{}');
+  logToSheet("INFO", `handleTextMessage for chatId ${chatId}. Text: "${text}". Initial state: ${JSON.stringify(state)}`);
+
+  // 1. Обработка команды /start
+  if (text === "/start") {
+    userProperties.deleteProperty('state_' + chatId);
+    logToSheet("INFO", `State for ${chatId} deleted on /start.`);
+    sendMainMenu(chatId);
+    return;
+  }
+
+  // 2. Обработка технических кнопок
+  if (text === 'АО "Прокатмонтаж" Гостиница') {
+      sendMainMenu(chatId);
+      return;
+  }
+  if (text === "⠀") { return; }
+
+  // 3. Обработка основных кнопок меню
+  if (text === "👷 Численность") {
+    userProperties.deleteProperty('state_' + chatId); 
+    state = {}; 
+    state.mode = 'headcount'; 
+    userProperties.setProperty('state_' + chatId, JSON.stringify(state));
+    logToSheet("INFO", `State for ${chatId} set to: ${JSON.stringify(state)}`);
+    sendHeadcountMenu(chatId);
+    return;
+  }
+
+  if (text === "🎯 Целевые задания") {
+    userProperties.deleteProperty('state_' + chatId);
+    state = {};
+    state.mode = 'tasks';
+    userProperties.setProperty('state_' + chatId, JSON.stringify(state));
+    logToSheet("INFO", `State for ${chatId} set to: ${JSON.stringify(state)}`);
+    const userRole = getUserRole(chatId);
+    if (userRole === "ИНЖЕНЕР") { sendEngineerTaskMenu(chatId); } 
+    else { sendContractorOrgList(chatId, "Выберите вашу организацию:"); }
+    return;
+  }
+
+  if (text === "🗓️ Недельно-суточное задание") {
+    userProperties.deleteProperty('state_' + chatId);
+    state = {};
+    state.mode = 'nsg';
+    userProperties.setProperty('state_' + chatId, JSON.stringify(state));
+    logToSheet("INFO", `State for ${chatId} set to: ${JSON.stringify(state)}`);
+    sendNsgMenu(chatId);
+    return;
+  }
+
+  if (text === "❓ Вопросы") {
+    userProperties.deleteProperty('state_' + chatId);
+    state = {};
+    state.mode = 'all_questions';
+    userProperties.setProperty('state_' + chatId, JSON.stringify(state));
+    logToSheet("INFO", `State for ${chatId} set to: ${JSON.stringify(state)}`);
+    sendQuestionsSubMenu(chatId);
+    return;
+  }
+
+  if (text === "☀️ Погода") {
+    userProperties.deleteProperty('state_' + chatId);
+    sendWeatherMenu(chatId);
+    return;
+  }
+
+  if (text === "📄 Добавить ПСД") {
+    userProperties.deleteProperty('state_' + chatId);
+    state = {};
+    if (getUserRole(chatId) === "ИНЖЕНЕР") {
+        state.mode = 'psd_log';
+        state.step = "awaiting_invoice_photo";
+        userProperties.setProperty('state_' + chatId, JSON.stringify(state));
+        logToSheet("INFO", `State for ${chatId} set to: ${JSON.stringify(state)}`);
+        sendMessage(chatId, "Отправьте фотографию накладной для добавления проектов в журнал.");
+    } else {
+        sendMessage(chatId, "У вас нет доступа к этому разделу.");
+    }
+    return;
+  }
+
+  // 4. Если это не кнопка меню, обрабатываем как ввод данных в текущем процессе
+  if (state.step === "awaiting_task_photo" || state.step === "awaiting_report_photo") {
+      sendMessage(chatId, "❌ Пожалуйста, отправьте фото, а не текст.");
+      return;
+  }
+
+  if (state.mode === 'headcount') {
+    handleHeadcountTextMessage(chatId, text, state);
+  } else if (state.mode === 'tasks') {
+    handleTasksTextMessage(chatId, text, state);
+  } else if (state.mode === 'questions') {
+    handleQuestionsTextMessage(chatId, text, state);
+  } else if (state.mode === 'complex') {
+    handleComplexTextMessage(chatId, text, state);
+  } else if (state.mode === 'psd_log') {
+    if (typeof handlePsdLogTextMessage === 'function') {
+        handlePsdLogTextMessage(chatId, text, state);
+    }
+  } else if (state.mode === 'complex_questions') {
+    handleComplexQuestionsTextMessage(chatId, text, state);
+  }
+}
+
+function handlePhotoMessage(chatId, photoArray) {
+    const userProperties = PropertiesService.getUserProperties();
+    let state = JSON.parse(userProperties.getProperty('state_' + chatId) || '{}');
+    logToSheet("INFO", "Received photo for chatId " + chatId + ". Current state: " + JSON.stringify(state));
+    Logger.log("Received photo for chatId " + chatId + ". Current state: " + JSON.stringify(state));
+
+    const fileId = photoArray[photoArray.length - 1].file_id;
+    const fileResponse = UrlFetchApp.fetch(TELEGRAM_URL + "/getFile?file_id=" + fileId);
+    const filePath = JSON.parse(fileResponse.getContentText()).result.file_path;
+    const fileUrl = "https://api.telegram.org/file/bot" + TELEGRAM_TOKEN + "/" + filePath;
+    const photoBlob = UrlFetchApp.fetch(fileUrl).getBlob();
+
+    if (state.step === "awaiting_task_photo" || state.step === "awaiting_report_photo") {
+        sendMessage(chatId, "⏳ Загружаю фото для задания, пожалуйста, подождите...");
+        const photoLink = uploadPhotoToDrive(photoBlob, `task_${state.taskNumber || 'new'}`);
+        
+        if(state.step === "awaiting_task_photo") {
+            state.taskPhotoFormula = photoLink;
+            state.step = "awaiting_task_deadline";
+            userProperties.setProperty('state_' + chatId, JSON.stringify(state));
+            logToSheet("INFO", `State for ${chatId} updated to: ${JSON.stringify(state)}`);
+            sendMessage(chatId, "✅ Фото добавлено. Теперь укажите срок выполнения (например, 01.12.2025):");
+        } else if (state.step === "awaiting_report_photo") {
+            state.reportPhotoFormula = photoLink;
+            userProperties.setProperty('state_' + chatId, JSON.stringify(state));
+            logToSheet("INFO", `State for ${chatId} updated to: ${JSON.stringify(state)}`);
+            submitReport(chatId, state);
+        }
+    } else if (state.step === "awaiting_invoice_photo") {
+        sendMessage(chatId, "⏳ Получил накладную. Отправляю на распознавание, это может занять до минуты...");
+        const photoLink = uploadPhotoToDrive(photoBlob, `invoice_${new Date().getTime()}`);
+        processInvoicePhoto(chatId, photoLink, photoBlob);
+    } else {
+        sendMessage(chatId, "Я не ожидал получить фото. Чтобы начать, нажмите /start");
+    }
+}
+
+function uploadPhotoToDrive(photoBlob, baseName) {
+    try {
+        const folder = DriveApp.getFolderById(DRIVE_FOLDER_ID);
+        const fileName = `${baseName}.jpg`;
+        const file = folder.createFile(photoBlob).setName(fileName);
+        file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+        
+        const photoUrl = `https://drive.google.com/uc?id=${file.getId()}`;
+        logToSheet("INFO", `Photo uploaded to Drive: ${photoUrl}`);
+        return photoUrl;
+    } catch (e) {
+        logToSheet("ERROR", "ERROR in uploadPhotoToDrive: " + e.toString());
+        Logger.log("ERROR in uploadPhotoToDrive: " + e.toString());
+        return null; 
+    }
+}
+
+function handleCallback(chatId, data) {
+  const userProperties = PropertiesService.getUserProperties();
+  let state = JSON.parse(userProperties.getProperty('state_' + chatId) || '{}');
+  logToSheet("INFO", `handleCallback for chatId ${chatId}. Data: "${data}". Initial state: ${JSON.stringify(state)}`);
+  const parts = data.split('_');
+  const action = parts[0];
+  const value = parts.slice(1).join('_');
+
+  if (action === 'back' && value === 'main') {
+    userProperties.deleteProperty('state_' + chatId);
+    logToSheet("INFO", `State for ${chatId} deleted on back to main menu.`);
+    sendMainMenu(chatId);
+    return;
+  }
+  
+  if (action === 'main') {
+    state.mode = value;
+    userProperties.setProperty('state_' + chatId, JSON.stringify(state));
+    logToSheet("INFO", `State for ${chatId} set to: ${JSON.stringify(state)}`);
+
+    if (value === 'tasks') {
+      const userRole = getUserRole(chatId);
+      if (userRole === "ИНЖЕНЕР") { sendEngineerTaskMenu(chatId); } 
+      else { sendContractorOrgList(chatId, "Выберите вашу организацию:"); }
+    } else if (value === 'headcount') {
+      sendHeadcountMenu(chatId); 
+    } else if (value === 'nsg') {
+        sendNsgMenu(chatId);
+    } else if (value === 'psd_log') {
+        state.step = "awaiting_invoice_photo";
+        userProperties.setProperty('state_' + chatId, JSON.stringify(state));
+        logToSheet("INFO", `State for ${chatId} updated to: ${JSON.stringify(state)}`);
+        sendMessage(chatId, "Отправьте фотографию накладной для добавления проектов в журнал.");
+    } 
+    else if (value === 'all_questions') {
+        sendQuestionsSubMenu(chatId);
+    } 
+    else if (value === 'weather') {
+        sendWeatherMenu(chatId);
+    }
+    else if (value === 'questions') {
+      sendQuestionsMenu(chatId);
+    } else if (value === 'complex') {
+      sendComplexMenu(chatId);
+    } else if (value === 'complex_questions') {
+        const userRole = getUserRole(chatId);
+        sendComplexQuestionsMenu(chatId, userRole);
+    }
+    return;
+  }
+
+  if (action === 'weather') {
+      if (value === 'today') {
+          sendWeatherForecast(chatId, 'today');
+      } else if (value === 'week') {
+          sendWeatherForecast(chatId, 'week');
+      }
+      return;
+  }
+  
+  if (state.mode === 'headcount') {
+    handleHeadcountCallback(chatId, data, state);
+  } else if (state.mode === 'tasks') {
+    handleTasksCallback(chatId, data, state);
+  } else if (state.mode === 'nsg') {
+    handleNsgCallback(chatId, data, state);
+  } else if (state.mode === 'questions') {
+    handleQuestionsCallback(chatId, data, state);
+  } else if (state.mode === 'complex') {
+    handleComplexCallback(chatId, data, state);
+  } else if (state.mode === 'complex_questions') {
+    handleComplexQuestionsCallback(chatId, data, state);
+  } else {
+    logToSheet("WARN", `No handler for state mode "${state.mode}" in handleCallback. Sending main menu.`);
+    sendMainMenu(chatId);
+  }
+}
+
+// =================================================================
+// --- МОДУЛЬ "ЧИСЛЕННОСТЬ" ---
+// =================================================================
+function handleHeadcountTextMessage(chatId, text, state) { if (state.step === "awaiting_number") { if (!isNaN(text) && text.trim() !== '') { writeDataToHeadcountSheet(chatId, state, Number(text)); } else { sendMessage(chatId, "❌ Ошибка. Пожалуйста, введите только число."); } } }
+function handleHeadcountCallback(chatId, data, state) { const userProperties = PropertiesService.getUserProperties(); const parts = data.split('_'); const action = parts[0]; const value = parts.slice(1).join('_'); if (action === 'headcount') { if (value === 'add') { sendDateSelection(chatId, "Выберите дату для внесения данных:"); } else if (value === 'summary') { sendHeadcountSummary(chatId); } return; } switch(action) { case 'date': state.date = value; state.step = "awaiting_org"; userProperties.setProperty('state_' + chatId, JSON.stringify(state)); sendOrgSelectionForHeadcount(chatId); break; case 'org': state.org = value; state.step = "awaiting_dir"; userProperties.setProperty('state_' + chatId, JSON.stringify(state)); sendDirSelectionForHeadcount(chatId, value); break; case 'dir': state.dir = value; state.step = "awaiting_shift"; userProperties.setProperty('state_' + chatId, JSON.stringify(state)); sendShiftSelection(chatId); break; case 'shift': state.shift = value; state.step = "awaiting_number"; userProperties.setProperty('state_' + chatId, JSON.stringify(state)); sendMessage(chatId, `Выбрана смена: "${state.shift}".\n\nТеперь введите численность персонала (только число):`); break; } }
+function writeDataToHeadcountSheet(chatId, state, number) { 
+  try { 
+    const ss = SpreadsheetApp.getActiveSpreadsheet(); 
+    const sheet = ss.getSheetByName(SHEET_NAME_HEADCOUNT); 
+    const spreadsheetTimezone = ss.getSpreadsheetTimeZone(); 
+    const data = sheet.getDataRange().getValues(); 
+    const dateRowIndex = data.findIndex(row => row[0] instanceof Date && Utilities.formatDate(row[0], spreadsheetTimezone, "dd.MM.yyyy") === state.date); 
+    if (dateRowIndex === -1) { 
+      sendMessage(chatId, `❌ Ошибка: Дата ${state.date} не найдена в таблице.`); 
+      return; 
+    } 
+    const headerOrgs = data[0]; 
+    const headerDirs = data[1]; 
+    const headerShifts = data[2]; 
+    let targetColumnIndex = -1; 
+    for (let i = 1; i < headerOrgs.length; i++) { 
+      if (headerOrgs[i] === state.org && headerDirs[i] === state.dir && headerShifts[i] === state.shift) { 
+        targetColumnIndex = i; 
+        break; 
+      } 
+    } 
+    if (targetColumnIndex === -1) { 
+      sendMessage(chatId, `❌ Ошибка: Комбинация "${state.org}" - "${state.dir}" - "${state.shift}" не найдена.`); 
+      return; 
+    } 
+    sheet.getRange(dateRowIndex + 1, targetColumnIndex + 1).setValue(number); 
+    sendMessage(chatId, `✅ Готово! Записано значение "${number}" для:\n\n📅 Дата: ${state.date}\n🏢 Организация: ${state.org}\n🛠️ Направление: ${state.dir}\n🌙 Смена: ${state.shift}`); 
+    sendMessage(chatId, "Данные сохранены."); 
+    PropertiesService.getUserProperties().deleteProperty('state_' + chatId); 
+    sendHeadcountMenu(chatId); 
+  } catch (err) { 
+    sendMessage(chatId, "❌ Произошла системная ошибка при записи в таблицу."); 
+    logToSheet("ERROR", "HEADCOUNT WRITE ERROR: " + err.toString());
+    Logger.log("HEADCOUNT WRITE ERROR: " + err.toString()); 
+  } 
+}
+}
+function sendShiftSelection(chatId) { const keyboard = { inline_keyboard: [ [{ text: "☀️ День", callback_data: "shift_День" }, { text: "🌙 Ночь", callback_data: "shift_Ночь" }] ] }; sendMessage(chatId, "Выберите смену:", keyboard); }
+function sendHeadcountMenu(chatId) { const userRole = getUserRole(chatId); if (userRole === "ИНЖЕНЕР") { const keyboard = { inline_keyboard: [ [{ text: "📝 Внести данные", callback_data: "headcount_add" }], [{ text: "📊 Сводка по численности", callback_data: "headcount_summary" }], [{ text: "⬅️ Главное меню", callback_data: "back_main" }] ] }; sendMessage(chatId, "Раздел: Численность", keyboard); } else { sendDateSelection(chatId, "Выберите дату для внесения данных:"); } }
+function sendHeadcountSummary(chatId) { try { sendMessage(chatId, "⏳ Собираю данные и готовлю сводку, пожалуйста, подождите..."); const ss = SpreadsheetApp.getActiveSpreadsheet(); const sheet = ss.getSheetByName(SHEET_NAME_HEADCOUNT); if (!sheet || sheet.getLastRow() < 4) { sendMessage(chatId, "❌ Не удалось получить данные: лист 'Численность' пуст или не найден."); return; } const data = sheet.getDataRange().getValues(); const headers = data.slice(0, 3); const rows = data.slice(3); const today = new Date(); const spreadsheetTimezone = ss.getSpreadsheetTimeZone(); const todayString = Utilities.formatDate(today, spreadsheetTimezone, "dd.MM.yyyy"); let todayDayTotal = 0; let todayNightTotal = 0; const todayRow = rows.find(row => row[0] instanceof Date && Utilities.formatDate(row[0], spreadsheetTimezone, "dd.MM.yyyy") === todayString); if (todayRow) { for (let i = 1; i < headers[2].length; i++) { const shift = headers[2][i]; const value = Number(todayRow[i]) || 0; if (shift === 'День') { todayDayTotal += value; } else if (shift === 'Ночь') { todayNightTotal += value; } } } const todayTotal = todayDayTotal + todayNightTotal; const monthlyAverages = calculateMonthlyAverages(rows, headers, today.getFullYear(), spreadsheetTimezone); let message = `📊 <b>Сводка по численности персонала</b>\n\n`; message += `<b><u>Данные за сегодня (${todayString}):</u></b>\n`; message += `☀️ Дневная смена: <b>${todayDayTotal} чел.</b>\n`; message += `🌙 Ночная смена: <b>${todayNightTotal} чел.</b>\n`; message += `📈 <b>Всего за сутки: ${todayTotal} чел.</b>\n\n`; message += `<b><u>Среднемесячная численность (${today.getFullYear()} год):</u></b>\n`; if (monthlyAverages.length > 0) { monthlyAverages.forEach(month => { message += `${month.name} - <b>${month.average} чел.</b>\n`; }); } else { message += "Данные за текущий год отсутствуют.\n"; } sendMessage(chatId, message, { inline_keyboard: [[{ text: "⬅️ Главное меню", callback_data: "back_main" }]] }); 
+  } catch (e) {
+    sendMessage(chatId, "❌ Произошла системная ошибка при формировании сводки.");
+    logToSheet("ERROR", "ERROR in sendHeadcountSummary: " + e.toString());
+    Logger.log("ERROR in sendHeadcountSummary: " + e.toString());
+  }
+}
+
+function handleTasksTextMessage(chatId, text, state) { const userProperties = PropertiesService.getUserProperties(); if (state.step === "awaiting_task_text") { state.taskText = text; state.step = "awaiting_task_photo_needed"; userProperties.setProperty('state_' + chatId, JSON.stringify(state)); askIfPhotoNeeded(chatId); } else if (state.step === "awaiting_task_deadline") { const validationResult = isValidDate(text); if (validationResult.isValid) { state.deadline = text; createTask(chatId, state); } else { sendMessage(chatId, validationResult.errorMessage); } } else if (state.step === "awaiting_report_text") { state.reportText = text; userProperties.setProperty('state_' + chatId, JSON.stringify(state)); submitReport(chatId, state); } else if (state.step === "awaiting_rework_comment") { state.reworkComment = text; sendTaskToRework(chatId, state); } }
+function handleTasksCallback(chatId, data, state) { const userRole = getUserRole(chatId); const userProperties = PropertiesService.getUserProperties(); const parts = data.split('_'); const action = parts[0]; const value = parts.slice(1).join('_'); if (action === 'back') { if (value === 'engineer_menu') { userProperties.deleteProperty('state_' + chatId); sendEngineerTaskMenu(chatId); } else if (value === 'contractor_list') { sendContractorOrgList(chatId, "Выберите подрядчика для просмотра заданий:"); } return; } if (userRole === "ИНЖЕНЕР") { if (action === 'engineer') { if (value === 'create') { state.step = "awaiting_contractor_choice"; sendContractorOrgList(chatId, "Выберите подрядчика для нового задания:"); } else if (value === 'review') { sendTasksForReview(chatId); } else if (value === 'by_contractor') { sendContractorOrgList(chatId, "Выберите подрядчика для просмотра заданий:"); } } else if (action === 'contractor') { const contractorName = value; if (state.step === "awaiting_contractor_choice") { state.contractor = contractorName; state.step = "awaiting_task_text"; sendMessage(chatId, `Подрядчик "${contractorName}" выбран.\n\nВведите текст задания:`); } else { showTasksToContractor(chatId, contractorName); } } else if (action === 'task') { const taskAction = parts[1]; const taskNumber = parts[2]; if (taskAction !== 'rate') { state.taskNumber = taskNumber; } if (taskAction === 'accept') { askForRating(chatId); } else if (taskAction === 'rework') { state.step = "awaiting_rework_comment"; sendMessage(chatId, "Введите комментарий для подрядчика (причину возврата):"); } else if (taskAction === 'rate') { const rating = taskNumber; acceptTask(chatId, state, rating); return; } else if (taskAction === 'delete') { deleteTaskAndRenumber(state.taskNumber); sendMessage(chatId, `✅ Задание №${state.taskNumber} успешно удалено.`); sendContractorOrgList(chatId, "Выберите подрядчика для просмотра заданий:"); } else { showTaskToEngineer(chatId, state.taskNumber, taskAction); } } else if (action === 'photo') { state.photoNeeded = (value === 'yes'); if (state.photoNeeded) { state.step = "awaiting_task_photo"; sendMessage(chatId, "Теперь прикрепите фото к заданию."); } else { state.step = "awaiting_task_deadline"; sendMessage(chatId, "Укажите срок выполнения (например, 01.12.2025):"); } } } if (userRole === "ПОДРЯДЧИК") { if (action === 'contractor') { const contractorName = parts.slice(1).join('_'); state.contractor = contractorName; showTasksToContractor(chatId, contractorName); } else if (action === 'task') { const taskAction = parts[1]; const taskNumber = parts[2]; state.taskNumber = taskNumber; if (taskAction === 'execute') { state.step = "awaiting_report_text"; sendMessage(chatId, `Задание №${taskNumber}.\nВведите текст отчета о выполнении:`); } else { showTaskDetailsToContractor(chatId, state.contractor, taskNumber); } } } userProperties.setProperty('state_' + chatId, JSON.stringify(state)); }
+function createTask(chatId, state) { try { const tasksSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_TASKS); const columnA_Values = tasksSheet.getRange("A:A").getValues(); let nextEmptyRow = 0; let lastId = 0; for (let i = 1; i < columnA_Values.length; i++) { if (columnA_Values[i][0] === "") { nextEmptyRow = i + 1; break; } } if (nextEmptyRow === 0) { nextEmptyRow = tasksSheet.getLastRow() + 1; } if (nextEmptyRow > 2) { lastId = tasksSheet.getRange(nextEmptyRow - 1, 1).getValue(); } else { lastId = 0; } const newId = Number(lastId) + 1; const accessSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_ACCESS); const engineerRow = getEngineerRow(chatId); const initiatorName = engineerRow > 0 ? accessSheet.getRange("A" + engineerRow).getValue() : "Неизвестный"; const newRowData = [ newId, "Новое", state.contractor, state.taskText, state.photoNeeded, state.taskPhotoFormula || "", state.deadline, "", state.photoNeeded, "", initiatorName, "", "", "", "", "" ]; tasksSheet.getRange(nextEmptyRow, 1, 1, newRowData.length).setValues([newRowData]); sendMessage(chatId, `✅ Задание №${newId} для "${state.contractor}" успешно создано.`); PropertiesService.getUserProperties().deleteProperty('state_' + chatId); sendEngineerTaskMenu(chatId); } catch (e) {
+    logToSheet("ERROR", "CREATE TASK ERROR: " + e.toString() + "\\nStack: " + e.stack);
+    Logger.log("CREATE TASK ERROR: " + e.toString() + "\\nStack: " + e.stack);
+    sendMessage(chatId, "❌ Произошла критическая ошибка при создании задания.");
+  }
+}
+function submitReport(chatId, state) { const userProperties = PropertiesService.getUserProperties(); const taskData = getTaskByNumber(state.taskNumber); if (taskData && taskData.ФЗАД === true && !state.reportPhotoFormula) { state.step = "awaiting_report_photo"; userProperties.setProperty('state_' + chatId, JSON.stringify(state)); sendMessage(chatId, "Текст отчета принят. Теперь, пожалуйста, прикрепите фото выполнения."); return; } const updates = { "Статус": "На проверке", "Текст выполнения": state.reportText || "", "Фото выполнения": state.reportPhotoFormula || "", "Комментарий инженера": "" }; const success = updateTaskByNumber(state.taskNumber, updates); if (success) { sendMessage(chatId, `✅ Отчет по заданию №${state.taskNumber} успешно отправлен.\n\nЧтобы начать, нажмите /start`); } else { sendMessage(chatId, `❌ Критическая ошибка: не удалось найти задание №${state.taskNumber} для обновления.`); } userProperties.deleteProperty('state_' + chatId); }
+function sendTasksForReview(chatId) { const data = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_TASKS).getDataRange().getValues(); const tasksToReview = data.filter(row => row[1] === "На проверке"); if (tasksToReview.length === 0) { sendMessage(chatId, "Заданий, ожидающих проверки, нет."); return; } const buttons = tasksToReview.map(task => [{ text: `№${task[0]} (${task[2]}) - ${task[3].substring(0, 15)}...`, callback_data: 'task_review_' + task[0] }]); buttons.push([{ text: "⬅️ Назад в меню", callback_data: "back_engineer_menu" }]); sendMessage(chatId, "Выберите задание для проверки:", { inline_keyboard: buttons }); }
+function showTaskToEngineer(chatId, taskNumber, mode) { const taskData = getTaskByNumber(taskNumber); if (!taskData) { sendMessage(chatId, "Ошибка: Задание не найдено."); return; } const spreadsheetTimezone = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone(); const title = (mode === 'review') ? `Задание №${taskData.Номер} на проверке` : `Задание №${taskData.Номер}`; let message = `<b>${title}</b>\n\n` + `<b>Подрядчик:</b> ${taskData.Подрядчик}\n` + `<b>Текст задания:</b> ${taskData["Текст задания"]}\n`; const taskPhotoLink = taskData["Фото задания"]; if (taskPhotoLink && taskPhotoLink.startsWith("http")) { message += `<b>Фото к заданию:</b> <a href="${taskPhotoLink}">Посмотреть</a>\n`; } message += `<b>Срок:</b> ${Utilities.formatDate(new Date(taskData["Срок выполнения"]), spreadsheetTimezone, "dd.MM.yyyy")}\n`; if (taskData["Текст выполнения"]) { message += `\n<b>ОТЧЕТ ПОДЯДЧИКА:</b>\n${taskData["Текст выполнения"]}`; const reportPhotoLink = taskData["Фото выполнения"]; if (reportPhotoLink && reportPhotoLink.startsWith("http")) { message += `\n<b>Фото выполнения:</b> <a href="${reportPhotoLink}">Посмотреть</a>`; } } let keyboard; if (mode === 'review') { keyboard = { inline_keyboard: [[{ text: "✅ Принять", callback_data: `task_accept_${taskNumber}` }, { text: "🔄 На доработку", callback_data: `task_rework_${taskNumber}` }], [{ text: "⬅️ К списку заданий", callback_data: 'engineer_review'}]] }; } else { keyboard = { inline_keyboard: [[{ text: "🗑️ Удалить задание", callback_data: `task_delete_${taskNumber}` }], [{ text: "⬅️ Назад к подрядчикам", callback_data: 'engineer_by_contractor'}]] }; } sendMessage(chatId, message, keyboard); }
+function askForRating(chatId) { const keyboard = { inline_keyboard: [[{ text: "⭐ 1", callback_data: "task_rate_1"},{ text: "⭐ 2", callback_data: "task_rate_2"},{ text: "⭐ 3", callback_data: "task_rate_3"},{ text: "⭐ 4", callback_data: "task_rate_4"},{ text: "⭐ 5", callback_data: "task_rate_5"}]] }; sendMessage(chatId, "Оцените выполненную работу:", keyboard); }
+function acceptTask(chatId, state, rating) { const userProperties = PropertiesService.getUserProperties(); const accessSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_ACCESS); const engineerRow = getEngineerRow(chatId); const engineerName = engineerRow > 0 ? accessSheet.getRange("A" + engineerRow).getValue() : "Неизвестный"; const updates = { "Статус": "Выполнено", "ВЫП": true, "Оценка": rating, "Принял": engineerName, "Дата выполнения": new Date() }; const success = updateTaskByNumber(state.taskNumber, updates); if (success) { sendMessage(chatId, `✅ Задание №${state.taskNumber} принято с оценкой ${rating}.`); sendEngineerTaskMenu(chatId); } else { sendMessage(chatId, `❌ Критическая ошибка: не удалось найти задание №${state.taskNumber} для обновления.`); } userProperties.deleteProperty('state_' + chatId); }
+function sendTaskToRework(chatId, state) { updateTaskByNumber(state.taskNumber, { "Статус": "На доработке", "Комментарий инженера": state.reworkComment }); sendMessage(chatId, `🔄 Задание №${state.taskNumber} возвращено подрядчику с комментарием.`); PropertiesService.getUserProperties().deleteProperty('state_' + chatId); sendEngineerTaskMenu(chatId); }
+function showTasksToContractor(chatId, contractorName) { const data = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_TASKS).getDataRange().getValues(); const contractorTasks = data.filter(row => row[2] === contractorName && (row[1] === "Новое" || row[1] === "На доработке" || row[1] === "В работе")); if (contractorTasks.length === 0) { sendMessage(chatId, "Для вашей организации нет активных заданий.", { inline_keyboard: [[{ text: "⬅️ Назад к выбору", callback_data: "back_contractor_list" }]]}); return; } const buttons = contractorTasks.map(task => [{ text: `(${task[1]}) ${task[3].substring(0, 30)}...`, callback_data: 'task_show_' + task[0] }]); buttons.push([{ text: "⬅️ Назад к выбору", callback_data: "back_contractor_list" }]); sendMessage(chatId, `Активные задания для "${contractorName}":`, { inline_keyboard: buttons }); }
+function showTaskDetailsToContractor(chatId, contractorName, taskNumber) { const taskData = getTaskByNumber(taskNumber); if (!taskData || taskData.Подрядчик !== contractorName) { sendMessage(chatId, "Ошибка: Задание не найдено."); return; } const spreadsheetTimezone = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone(); let message = `<b>Задание №${taskData.Номер}</b>\n\n` + `<b>Текст:</b> ${taskData["Текст задания"]}\n`; const taskPhotoLink = taskData["Фото задания"]; if (taskPhotoLink && taskPhotoLink.startsWith("http")) { message += `<b>Фото к заданию:</b> <a href="${taskPhotoLink}">Посмотреть</a>\n`; } message += `<b>Срок выполнения:</b> ${Utilities.formatDate(new Date(taskData["Срок выполнения"]), spreadsheetTimezone, "dd.MM.yyyy")}\n`; if (taskData.Статус === "На доработке" && taskData["Комментарий инженера"]) { message += `\n❗️<b>Комментарий инженера:</b> <i>${taskData["Комментарий инженера"]}</i>\n`; } const keyboard = { inline_keyboard: [[{ text: "📝 Выполнить задание", callback_data: `task_execute_${taskNumber}` }], [{ text: "⬅️ К списку заданий", callback_data: `contractor_${contractorName}` }]] }; sendMessage(chatId, message, keyboard); }
+
+// =================================================================
+// --- МОДУЛЬ НАПОМИНАНИЙ ---
+// =================================================================
+const TASK_REMINDER_SETTINGS = { contractorCol: 3, statusCol: 2, overdueStatus: "Просрочено" };
+function sendDayRemindersToContractors() { processReminders("День", "Подрядчик"); }
+function sendNightRemindersToContractors() { processReminders("Ночь", "Подрядчик"); }
+function sendDayReportToEngineers() { processReminders("День", "Инженер"); }
+function sendNightReportToEngineers() { processReminders("Ночь", "Инженер"); }
+function processReminders(shiftType, recipientType) { const ss = SpreadsheetApp.getActiveSpreadsheet(); const accessSheet = ss.getSheetByName(SHEET_NAME_ACCESS); const headcountSheet = ss.getSheetByName(SHEET_NAME_HEADCOUNT); const notificationControlSheet = ss.getSheetByName("Численность расширенная"); const notificationFlags = getNotificationFlags(notificationControlSheet); const taskCounts = getTaskCountsForReminders(); const contractorsData = accessSheet.getRange("C2:E" + accessSheet.getLastRow()).getValues(); const submittedList = []; const delinquentList = []; contractorsData.forEach(row => { const contractorName = row[0], directionName = row[1], telegramIdsString = row[2]; if (!contractorName) return; const notificationKey = `${contractorName}|${directionName}|${shiftType}`; if (!notificationFlags[notificationKey]) return; const headcountValue = getSubmittedHeadcountForShift(headcountSheet, contractorName, directionName, shiftType); if (headcountValue !== null) { submittedList.push(`- ${contractorName} (${directionName}): <b>${headcountValue} чел.</b>`); } else { if (telegramIdsString) { delinquentList.push({ name: contractorName, direction: directionName, ids: telegramIdsString }); } } }); if (recipientType === "Подрядчик") { const userFriendlyShiftName = (shiftType === "День") ? "дневную" : "ночную"; delinquentList.forEach(d => { let reminderMessage = `Здравствуйте!\n\nНапоминание по отчетности за ${userFriendlyShiftName} смену.\n\n`; reminderMessage += `❗️ <b>Численность:</b> Пожалуйста, предоставьте данные по направлению "${d.direction}".\n\n`; const contractorKey = d.name.toString().trim().toLowerCase(); const tasks = taskCounts[contractorKey]; if (tasks) { reminderMessage += `🎯 <b>Целевые задания:</b>\n- Просрочено: ${tasks.overdue}\n- В работе: ${tasks.inProgress}\n\n`; } reminderMessage += "Спасибо!"; const telegramIds = d.ids.toString().split(',').map(id => id.trim()); telegramIds.forEach(chatId => { if (chatId) { sendMessage(chatId, reminderMessage); } }); }); } else if (recipientType === "Инженер") { const userFriendlyShiftName = (shiftType === "День") ? "дневную" : "ночную"; let reportMessage = `Сводка по численности за ${userFriendlyShiftName} смену.\n\n`; if (submittedList.length > 0) { reportMessage += `<b>✅ Данные предоставили:</b>\n\n` + submittedList.join('\n\n'); } if (submittedList.length > 0 && delinquentList.length > 0) { reportMessage += `\n\n`; } if (delinquentList.length > 0) { reportMessage += `<b>❗️ Данные не предоставили:</b>\n\n` + delinquentList.map(d => `- ${d.name} (${d.direction})`).join('\n\n'); } if (submittedList.length === 0 && delinquentList.length === 0) { reportMessage = `Нет подрядчиков с включенными уведомлениями для ${userFriendlyShiftName} смены.`; } const engineersData = accessSheet.getRange("A2:B" + accessSheet.getLastRow()).getValues(); engineersData.forEach(row => { const engineerIdsString = row[1]; if (engineerIdsString) { const engineerIds = engineerIdsString.toString().split(',').map(id => id.trim()); engineerIds.forEach(chatId => { if (chatId) sendMessage(chatId, reportMessage); }); } }); } Logger.log(`Процесс "${recipientType}" для смены "${shiftType}" завершен.`); }
+function getNotificationFlags(sheet) { const data = sheet.getDataRange().getValues(); const flags = {}; for (let i = 1; i < data.length; i++) { const row = data[i], contractor = row[3], direction = row[4], shift = row[5], isEnabled = row[6]; if (contractor && direction && shift) { flags[`${contractor}|${direction}|${shift}`] = isEnabled; } } return flags; }
+function getSubmittedHeadcountForShift(sheet, contractorName, directionName, shiftType) { const today = new Date(); const timezone = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone(); const todayString = Utilities.formatDate(today, timezone, "yyyy-MM-dd"); const data = sheet.getDataRange().getValues(); let targetRowIndex = -1; for (let i = 3; i < data.length; i++) { if (data[i][0] instanceof Date) { if (Utilities.formatDate(data[i][0], timezone, "yyyy-MM-dd") === todayString) { targetRowIndex = i + 1; break; } } } if (targetRowIndex === -1) return null; const headerOrgs = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0]; const headerDirs = sheet.getRange(2, 1, 1, sheet.getLastColumn()).getValues()[0]; const headerShifts = sheet.getRange(3, 1, 1, sheet.getLastColumn()).getValues()[0]; let targetColIndex = -1; for (let i = 1; i < headerOrgs.length; i++) { if (headerOrgs[i] === contractorName && headerDirs[i] === directionName && headerShifts[i] === shiftType) { targetColIndex = i + 1; break; } } if (targetColIndex === -1) return null; const value = sheet.getRange(targetRowIndex, targetColIndex).getValue(); return (value === null || value === "") ? null : value; }
+function getTaskCountsForReminders() { const tasksSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_TASKS); const tasksData = tasksSheet.getRange(2, 1, tasksSheet.getLastRow() - 1, tasksSheet.getLastColumn()).getValues(); const counts = {}; const activeStatuses = ["в работе", "новое", "на доработке"]; tasksData.forEach(row => { const contractor = row[TASK_REMINDER_SETTINGS.contractorCol - 1], status = row[TASK_REMINDER_SETTINGS.statusCol - 1]; if (contractor && status) { const key = contractor.toString().trim().toLowerCase(); if (!counts[key]) { counts[key] = { overdue: 0, inProgress: 0 }; } const statusClean = status.toString().trim().toLowerCase(); if (statusClean === TASK_REMINDER_SETTINGS.overdueStatus.toLowerCase()) { counts[key].overdue++; } else if (activeStatuses.includes(statusClean)) { counts[key].inProgress++; } } }); return counts; }
+
+// =================================================================
+// --- МОДУЛИ ВОПРОСОВ ---
+// =================================================================
+function handleQuestionsTextMessage(chatId, text, state) { if (state.step === "awaiting_question_text") { addQuestionToSheet(chatId, text); } }
+function addQuestionToSheet(chatId, questionText) { try { const ss = SpreadsheetApp.getActiveSpreadsheet(); const sheet = ss.getSheetByName(SHEET_NAME_QUESTIONS); if (!sheet) { sendMessage(chatId, `❌ Ошибка: Лист "${SHEET_NAME_QUESTIONS}" не найден.`); return; } const columnDValues = sheet.getRange("D10:D" + sheet.getMaxRows()).getValues(); let targetRow = -1; for (let i = 0; i < columnDValues.length; i++) { if (columnDValues[i][0] === "") { targetRow = i + 10; break; } } if (targetRow === -1) { targetRow = sheet.getLastRow() + 1; } if (targetRow < 10) { targetRow = 10; } const accessSheet = ss.getSheetByName(SHEET_NAME_ACCESS); const engineerRow = getEngineerRow(chatId); const initiatorName = engineerRow > 0 ? accessSheet.getRange(engineerRow, 1).getValue() : "Неизвестный"; const formattedDate = Utilities.formatDate(new Date(), ss.getSpreadsheetTimeZone(), "dd.MM.yy"); sheet.getRange(targetRow, 3).setValue(formattedDate); sheet.getRange(targetRow, 4).setValue(questionText); sheet.getRange(targetRow, 6).setValue(initiatorName); sendMessage(chatId, `✅ Вопрос успешно добавлен в строку №${targetRow}.`); PropertiesService.getUserProperties().deleteProperty('state_' + chatId); sendMainMenu(chatId); } catch (e) {
+    sendMessage(chatId, "❌ Произошла системная ошибка при записи вопроса.");
+    logToSheet("ERROR", "ADD QUESTION ERROR: " + e.toString());
+    Logger.log("ADD QUESTION ERROR: " + e.toString());
+  }
+}
+function handleQuestionsCallback(chatId, data, state) { const userProperties = PropertiesService.getUserProperties(); const value = data.split('_')[1]; if (value === 'add') { state.step = "awaiting_question_text"; userProperties.setProperty('state_' + chatId, JSON.stringify(state)); sendMessage(chatId, "Введите наименование (текст) вопроса:"); } else if (value === 'list') { sendInProgressQuestions(chatId); } }
+function sendInProgressQuestions(chatId) { try { const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_QUESTIONS); if (!sheet) { sendMessage(chatId, `❌ Ошибка: Лист "${SHEET_NAME_QUESTIONS}" не найден.`); return; } if (sheet.getLastRow() < 10) { sendMessage(chatId, "Вопросов со статусом 'В работе' не найдено."); sendQuestionsMenu(chatId); return; } const dataRange = sheet.getRange("D10:G" + sheet.getLastRow()).getValues(); const inProgressQuestions = dataRange.filter(row => row[3] === "В работе" && row[0] !== "").map(row => row[0]); let message; if (inProgressQuestions.length === 0) { message = "Вопросов со статусом 'В работе' не найдено."; } else { message = "<b>📋 Список вопросов в работе:</b>\n\n" + inProgressQuestions.map((q, i) => `${i + 1}. ${q}\n\n`).join(''); } sendMessage(chatId, message, { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "main_all_questions" }]] }); } catch (e) {
+    sendMessage(chatId, "❌ Произошла ошибка при получении списка вопросов.");
+    logToSheet("ERROR", "ERROR in sendInProgressQuestions: " + e.toString());
+    Logger.log("ERROR in sendInProgressQuestions: " + e.toString());
+  }
+}
+function handleComplexCallback(chatId, data, state) { const userProperties = PropertiesService.getUserProperties(); const parts = data.split('_'); const action = parts[1], value = parts.slice(2).join('_'); if (action === 'add') { state.step = "awaiting_complex_text"; userProperties.setProperty('state_' + chatId, JSON.stringify(state)); sendMessage(chatId, "Введите текст вопроса:"); } else if (action === 'list') { sendExecutorSelectionMenu(chatId); } else if (action === 'show') { sendInProgressComplexQuestions(chatId, value); } }
+function handleComplexTextMessage(chatId, text, state) { const userProperties = PropertiesService.getUserProperties(); if (state.step === "awaiting_complex_text") { state.complexText = text; state.step = "awaiting_complex_deadline"; userProperties.setProperty('state_' + chatId, JSON.stringify(state)); sendMessage(chatId, "✅ Текст принят. Теперь введите срок выполнения (например, 01.12.2025):"); } else if (state.step === "awaiting_complex_deadline") { const validationResult = isValidDate(text); if (validationResult.isValid) { state.complexDeadline = text; state.step = "awaiting_complex_assignee"; userProperties.setProperty('state_' + chatId, JSON.stringify(state)); sendMessage(chatId, "✅ Срок принят. Теперь укажите исполнителя (кому адресован вопрос):"); } else { sendMessage(chatId, validationResult.errorMessage); } } else if (state.step === "awaiting_complex_assignee") { state.complexAssignee = text; addComplexQuestionToSheet(chatId, state); } }
+function addComplexQuestionToSheet(chatId, state) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(SHEET_NAME_COMPLEX_PROTOCOL);
+    if (!sheet) {
+      sendMessage(chatId, `❌ Ошибка: Лист "${SHEET_NAME_COMPLEX_PROTOCOL}" не найден.`);
+      return;
+    }
+    const columnAValues = sheet.getRange("A4:A" + sheet.getMaxRows()).getValues();
+    let targetRow = -1;
+    for (let i = 0; i < columnAValues.length; i++) {
+      if (columnAValues[i][0] === "") {
+        targetRow = i + 4;
+        break;
+      }
+    }
+    if (targetRow === -1) {
+      targetRow = sheet.getLastRow() + 1;
+    }
+    if (targetRow < 4) {
+      targetRow = 4;
+    }
+    const engineerRow = getEngineerRow(chatId);
+    const initiatorName = engineerRow > 0 ? ss.getSheetByName(SHEET_NAME_ACCESS).getRange(engineerRow, 1).getValue() : "Неизвестный";
+    sheet.getRange(targetRow, 1).setValue(state.complexText);      // Столбец A (Вопрос)
+    sheet.getRange(targetRow, 2).setValue("В работе");             // Столбец B (Статус)
+    sheet.getRange(targetRow, 3).setValue(state.complexDeadline);  // Столбец C (Срок 1)
+    sheet.getRange(targetRow, 7).setValue(state.complexAssignee);  // Столбец G (Исполнитель)
+    sheet.getRange(targetRow, 8).setValue(new Date());             // Столбец H (Дата)
+    sheet.getRange(targetRow, 10).setValue(initiatorName);         // Столбец J (Инициатор)
+    sendMessage(chatId, `✅ Вопрос для комплекса успешно добавлен в строку №${targetRow}.`);
+    PropertiesService.getUserProperties().deleteProperty('state_' + chatId);
+    sendMainMenu(chatId);
+  } catch (e) {
+    sendMessage(chatId, "❌ Произошла системная ошибка при записи вопроса.");
+    logToSheet("ERROR", "ADD COMPLEX QUESTION ERROR: " + e.toString());
+    Logger.log("ADD COMPLEX QUESTION ERROR: " + e.toString());
+  }
+}
+function sendInProgressComplexQuestions(chatId, executorFilter = null) {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_COMPLEX_PROTOCOL);
+    if (!sheet) {
+      sendMessage(chatId, `❌ Ошибка: Лист "${SHEET_NAME_COMPLEX_PROTOCOL}" не найден.`);
+      return;
+    }
+    if (sheet.getLastRow() < 4) {
+      sendMessage(chatId, "Вопросов со статусом 'В работе' не найдено.");
+      sendComplexMenu(chatId);
+      return;
+    }
+    const dataRange = sheet.getRange("A4:G" + sheet.getLastRow()).getValues();
+    let inProgressQuestions = dataRange.filter(row => String(row[1]).trim() === "В работе" && row[0] !== "").map(row => ({
+      text: row[0],
+      deadline: row[2],
+      assignee: row[6] 
+    }));
+    if (executorFilter && executorFilter !== 'all') {
+      inProgressQuestions = inProgressQuestions.filter(q => q.assignee === executorFilter);
+    }
+    let message;
+    if (inProgressQuestions.length === 0) {
+      const filterText = (executorFilter && executorFilter !== 'all') ? ` для исполнителя ${executorFilter}` : '';
+      message = "Вопросов со статусом 'В работе'" + filterText + " не найдено.";
+    } else {
+      const title = (executorFilter && executorFilter !== 'all') ? `по исполнителю ${executorFilter}` : 'все';
+      message = `<b>📋 Список вопросов комплекса в работе (${title}):</b>\n\n`;
+      const spreadsheetTimezone = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+      inProgressQuestions.forEach((q, index) => {
+        let formattedDeadline = "не указан";
+        if (q.deadline instanceof Date) {
+          formattedDeadline = Utilities.formatDate(q.deadline, spreadsheetTimezone, "dd.MM.yyyy");
+        } else if (typeof q.deadline === 'string' && q.deadline.trim() !== '') {
+          formattedDeadline = q.deadline;
+        }
+        message += `<b>${index + 1}. Вопрос:</b> ${q.text}\n` +
+                   `<b>Срок:</b> ${formattedDeadline}\n` +
+                   `<b>Исполнитель:</b> ${q.assignee}\n\n`;
+      });
+    }
+    sendMessage(chatId, message, { inline_keyboard: [[{ text: "⬅️ Назад к выбору исполнителя", callback_data: "complex_list" }]] });
+  } catch (e) {
+    sendMessage(chatId, "❌ Произошла ошибка при получении списка вопросов.");
+    logToSheet("ERROR", "ERROR in sendInProgressComplexQuestions: " + e.toString());
+    Logger.log("ERROR in sendInProgressComplexQuestions: " + e.toString());
+  }
+}
+function sendExecutorSelectionMenu(chatId) {
+  try {
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_COMPLEX_PROTOCOL);
+    if (!sheet || sheet.getLastRow() < 4) {
+      sendMessage(chatId, "Вопросов в работе нет.", { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "main_complex" }]] });
+      return;
+    }
+    const dataRange = sheet.getRange("A4:G" + sheet.getLastRow()).getValues();
+    const questionsByExecutor = {};
+    dataRange.forEach(row => {
+      const status = row[1] ? String(row[1]).trim() : "";
+      const assignee = row[6]; 
+      if (status === "В работе" && assignee) {
+        if (!questionsByExecutor[assignee]) {
+          questionsByExecutor[assignee] = 0;
+        }
+        questionsByExecutor[assignee]++;
+      }
+    });
+    const executorNames = Object.keys(questionsByExecutor);
+    if (executorNames.length === 0) {
+      sendMessage(chatId, "Активных вопросов по исполнителям не найдено.", { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "main_complex" }]] });
+      return;
+    }
+    const buttons = executorNames.map(name => [{ text: `${name} - ${questionsByExecutor[name]}`, callback_data: `complex_show_${name}` }]);
+    buttons.push([{ text: "📋 Показать все вопросы", callback_data: "complex_show_all" }]);
+    buttons.push([{ text: "⬅️ Назад в меню комплекса", callback_data: "main_complex" }]);
+    sendMessage(chatId, "Выберите исполнителя для просмотра вопросов:", { inline_keyboard: buttons });
+  } catch (e) {
+    sendMessage(chatId, "❌ Ошибка при формировании списка исполнителей.");
+    logToSheet("ERROR", "ERROR in sendExecutorSelectionMenu: " + e.toString());
+    Logger.log("ERROR in sendExecutorSelectionMenu: " + e.toString());
+  }
+}
+function handleComplexQuestionsCallback(chatId, data, state) { const userProperties = PropertiesService.getUserProperties(); const parts = data.split('_'); const action = parts[1], value = parts.slice(2).join('_'); if (action === 'add') { state.step = 'awaiting_cpxq_text'; userProperties.setProperty('state_' + chatId, JSON.stringify(state)); sendMessage(chatId, "Введите текст вашего вопроса:"); } else if (action === 'list') { if (value === 'all') { showAllComplexQuestions(chatId); } else if (value === 'menu') { sendContractorQuestionListMenu(chatId); } } else if (action === 'show') { showContractorComplexQuestions(chatId, value); } else if (action === 'details') { showQuestionDetailsForEngineer(chatId, value); } else if (action === 'complete') { markQuestionAsComplete(chatId, value); } else if (action === 'initiator') { state.cpxq_initiator = value; userProperties.setProperty('state_' + chatId, JSON.stringify(state)); addComplexQuestionByContractor(chatId, state); } }
+function handleComplexQuestionsTextMessage(chatId, text, state) { const userProperties = PropertiesService.getUserProperties(); if (state.step === 'awaiting_cpxq_text') { state.cpxq_text = text; state.step = 'awaiting_cpxq_initiator'; userProperties.setProperty('state_' + chatId, JSON.stringify(state)); sendMessage(chatId, "✅ Текст принят. Теперь выберите организацию-инициатора вопроса:"); sendContractorSelectionForQuestion(chatId); } }
+function addComplexQuestionByContractor(chatId, state) { try { const initiatorName = state.cpxq_initiator; if (!initiatorName) { sendMessage(chatId, "❌ Ошибка: не удалось определить организацию-инициатора."); return; } const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_COMPLEX_QUESTIONS); const targetRow = sheet.getLastRow() + 1; const formattedDate = Utilities.formatDate(new Date(), SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone(), "dd.MM.yyyy"); sheet.getRange(targetRow, 2).setValue(state.cpxq_text); sheet.getRange(targetRow, 3).setValue("В работе"); sheet.getRange(targetRow, 7).setValue(formattedDate); sheet.getRange(targetRow, 9).setValue(initiatorName); const lastQuestionNumber = sheet.getRange(targetRow - 1, 1).getValue(); const newQuestionNumber = (typeof lastQuestionNumber === 'number' ? lastQuestionNumber : 0) + 1; sheet.getRange(targetRow, 1).setValue(newQuestionNumber); sendMessage(chatId, `✅ Ваш вопрос №${newQuestionNumber} от имени "${initiatorName}" успешно зарегистрирован.`); PropertiesService.getUserProperties().deleteProperty('state_' + chatId); sendMainMenu(chatId); } catch (e) {
+    sendMessage(chatId, "❌ Произошла системная ошибка при добавлении вопроса.");
+    logToSheet("ERROR", "ERROR in addComplexQuestionByContractor: " + e.toString());
+    Logger.log("ERROR in addComplexQuestionByContractor: " + e.toString());
+  }
+}
+function showAllComplexQuestions(chatId) { const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_COMPLEX_QUESTIONS); const data = sheet.getRange("B4:I" + sheet.getLastRow()).getValues(); const activeQuestions = data.map((row, index) => ({ data: row, rowNum: index + 4 })).filter(item => item.data[1] === 'В работе' && item.data[0]); if (activeQuestions.length === 0) { sendMessage(chatId, "Активных вопросов к комплексу нет."); return; } const buttons = activeQuestions.map(q => [{ text: `От ${q.data[7]}: ${q.data[0].substring(0, 25)}...`, callback_data: `cpxq_details_${q.rowNum}` }]); buttons.push([{ text: "⬅️ Назад", callback_data: "main_complex_questions" }]); sendMessage(chatId, "Выберите вопрос для просмотра или изменения статуса:", { inline_keyboard: buttons }); }
+function showContractorComplexQuestions(chatId, contractorName) { const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_COMPLEX_QUESTIONS); const data = sheet.getRange("B4:I" + sheet.getLastRow()).getValues(); const contractorQuestions = data.filter(row => row[1] === 'В работе' && row[7] === contractorName && row[0]); if (contractorQuestions.length === 0) { sendMessage(chatId, `У организации "${contractorName}" нет активных вопросов.`); sendContractorQuestionListMenu(chatId); return; } let message = `<b>📋 Вопросы в работе для "${contractorName}":</b>\n\n` + contractorQuestions.map((q, index) => `${index + 1}. ${q[0]}\n\n`).join(''); sendMessage(chatId, message, { inline_keyboard: [[{ text: "⬅️ К списку организаций", callback_data: "cpxq_list_menu" }]] }); }
+function showQuestionDetailsForEngineer(chatId, rowNum) { const ss = SpreadsheetApp.getActiveSpreadsheet(); const sheet = ss.getSheetByName(SHEET_NAME_COMPLEX_QUESTIONS); const rowData = sheet.getRange(rowNum, 2, 1, 8).getValues()[0]; const ssTimezone = ss.getSpreadsheetTimeZone(); let formattedDeadline = "не указан"; if (rowData[2] instanceof Date) { formattedDeadline = Utilities.formatDate(new Date(rowData[2]), ssTimezone, "dd.MM.yyyy"); } else if (typeof rowData[2] === 'string' && rowData[2].trim() !== '') { formattedDeadline = rowData[2]; } const message = `<b>Вопрос №${sheet.getRange(rowNum, 1).getValue()}</b>\n\n` + `<b>Текст:</b> ${rowData[0]}\n` + `<b>Статус:</b> ${rowData[1]}\n` + `<b>Срок решения:</b> ${formattedDeadline}\n` + `<b>Дата возникновения:</b> ${Utilities.formatDate(new Date(rowData[5]), ssTimezone, "dd.MM.yyyy")}\n` + `<b>Инициатор:</b> ${rowData[7]}`; const keyboard = { inline_keyboard: [[{ text: "✅ Отметить выполненным", callback_data: `cpxq_complete_${rowNum}` }], [{ text: "⬅️ К списку вопросов", callback_data: "cpxq_list_all" }]] }; sendMessage(chatId, message, keyboard); }
+function markQuestionAsComplete(chatId, rowNum) { const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_COMPLEX_QUESTIONS); sheet.getRange(rowNum, 3).setValue("Выполнено"); sendMessage(chatId, `✅ Статус вопроса №${sheet.getRange(rowNum, 1).getValue()} изменен на "Выполнено".`); showAllComplexQuestions(chatId); }
+function sendContractorSelectionForQuestion(chatId) { try { const accessSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_ACCESS); const contractorsData = accessSheet.getRange("C2:C" + accessSheet.getLastRow()).getValues(); const uniqueContractors = [...new Set(contractorsData.flat().filter(String))]; if (uniqueContractors.length === 0) { sendMessage(chatId, "❌ В системе не зарегистрировано ни одного подрядчика."); return; } const buttons = uniqueContractors.map(name => [{ text: name, callback_data: `cpxq_initiator_${name}` }]); sendMessage(chatId, "Выберите организацию-инициатора вопроса:", { inline_keyboard: buttons }); } catch (e) {
+    sendMessage(chatId, "❌ Произошла ошибка при получении списка организаций.");
+    logToSheet("ERROR", "ERROR in sendContractorSelectionForQuestion: " + e.toString());
+    Logger.log("ERROR in sendContractorSelectionForQuestion: " + e.toString());
+  }
+}
+function sendContractorQuestionListMenu(chatId) { try { const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_COMPLEX_QUESTIONS); if (!sheet || sheet.getLastRow() < 4) { sendMessage(chatId, "Активных вопросов к комплексу нет.", { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "main_complex_questions" }]] }); return; } const dataRange = sheet.getRange("B4:I" + sheet.getLastRow()).getValues(); const questionsByInitiator = {}; dataRange.forEach(row => { const status = row[1], initiator = row[7]; if (status === "В работе" && initiator) { if (!questionsByInitiator[initiator]) { questionsByInitiator[initiator] = 0; } questionsByInitiator[initiator]++; } }); const initiatorNames = Object.keys(questionsByInitiator); if (initiatorNames.length === 0) { sendMessage(chatId, "Активных вопросов к комплексу не найдено.", { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "main_complex_questions" }]] }); return; } const buttons = initiatorNames.map(name => [{ text: `${name} - ${questionsByInitiator[name]}`, callback_data: `cpxq_show_${name}` }]); buttons.push([{ text: "⬅️ Назад", callback_data: "main_complex_questions" }]); sendMessage(chatId, "Выберите организацию для просмотра вопросов:", { inline_keyboard: buttons }); } catch (e) {
+    sendMessage(chatId, "❌ Ошибка при формировании списка организаций.");
+    logToSheet("ERROR", "ERROR in sendContractorQuestionListMenu: " + e.toString());
+    Logger.log("ERROR in sendContractorQuestionListMenu: " + e.toString());
+  }
+}
+
+
+// =================================================================
+// --- МОДУЛЬ "ЖУРНАЛ ПСД" ---
+// =================================================================
+function processInvoicePhoto(chatId, photoLink, photoBlob) { try { const invoiceData = callGeminiVisionAPI(photoBlob); if (!invoiceData || !invoiceData.items || invoiceData.items.length === 0) { const errorMessage = invoiceData ? invoiceData.error : "Не удалось распознать данные."; sendMessage(chatId, `❌ Ошибка распознавания: ${errorMessage}`); PropertiesService.getUserProperties().deleteProperty('state_' + chatId); sendMainMenu(chatId); return; } const isDuplicate = checkIfInvoiceExists(invoiceData); if (isDuplicate) { sendMessage(chatId, `⚠️ Эта накладная (номер: ${invoiceData.number || 'б/н'}) уже была добавлена.`); PropertiesService.getUserProperties().deleteProperty('state_' + chatId); sendMainMenu(chatId); return; } const addedCount = addPsdToLog(chatId, invoiceData, photoLink); if (addedCount > 0) { sendMessage(chatId, `✅ Успешно добавлено ${addedCount} проект(а/ов) в журнал.`); } else { sendMessage(chatId, "❌ Ошибка при добавлении проектов в журнал."); } PropertiesService.getUserProperties().deleteProperty('state_' + chatId); sendMainMenu(chatId); } catch(e) {
+    sendMessage(chatId, "❌ Критическая ошибка при обработке накладной.");
+    logToSheet("ERROR", "ERROR in processInvoicePhoto: " + e.toString());
+    Logger.log("ERROR in processInvoicePhoto: " + e.toString());
+  }
+}
+function callGeminiVisionAPI(imageBlob) {
+  const YOUR_PROJECT_ID = "gen-lang-client-0978272443";
+  if (!GEMINI_API_KEY) {
+    logToSheet("ERROR", "Gemini API Error: API key is not set.");
+    Logger.log("Gemini API Error: API key is not set.");
+    return { error: "Ключ API не установлен." };
+  }
+  const geminiApiUrl = `https://us-central1-aiplatform.googleapis.com/v1/projects/${YOUR_PROJECT_ID}/locations/us-central1/publishers/google/models/gemini-pro-vision:streamGenerateContent`;
+  const requestBody = {
+    "contents":[
+      {
+        "parts":[
+          { "text": "Извлеки номер накладной, дату, объект, получателя и список шифров из таблицы. Ответ дай только в формате JSON: {\"number\": \"...\", \"date\": \"...\", \"objectName\": \"...\", \"contractor\": \"...\", \"items\": [{\"code\": \"...\"}]}" },
+          { "inline_data": { "mime_type":"image/jpeg", "data": Utilities.base64Encode(imageBlob.getBytes()) } }
+        ]
+      }
+    ]
+  };
+  const options = {
+    'method': 'post',
+    'contentType': 'application/json',
+    'payload': JSON.stringify(requestBody),
+    'muteHttpExceptions': true,
+    'headers': {
+      'Authorization': 'Bearer ' + ScriptApp.getOAuthToken()
+    }
+  };
+  try {
+    logToSheet("INFO", "Calling Gemini Vision API...");
+    const response = UrlFetchApp.fetch(geminiApiUrl, options);
+    const responseCode = response.getResponseCode(), responseText = response.getContentText();
+    logToSheet("INFO", "Gemini API Response Code: " + responseCode);
+    Logger.log("Gemini API Response: " + responseText);
+    if (responseCode !== 200) {
+      try {
+        const errorMsg = `Сервер API вернул ошибку: ${JSON.parse(responseText).error.message}`;
+        logToSheet("ERROR", "Gemini API Error: " + errorMsg);
+        return { error: errorMsg };
+      } catch (e) {
+        const errorMsg = `Сервер API вернул код ${responseCode}.`;
+        logToSheet("ERROR", "Gemini API Error: " + errorMsg);
+        return { error: errorMsg };
+      }
+    }
+    const fullText = JSON.parse(responseText)[0].candidates[0].content.parts[0].text;
+    if (!fullText) {
+      logToSheet("ERROR", "Gemini API Error: API did not return text data.");
+      return { error: `API не вернул текстовых данных.` };
+    }
+    logToSheet("INFO", "Gemini API Success. Parsed text received.");
+    return JSON.parse(fullText);
+  } catch (e) {
+    logToSheet("ERROR", "Critical Error calling Gemini API: " + e.toString());
+    Logger.log("Critical Error calling Gemini API: " + e.toString());
+    return { error: "Критическая ошибка при вызове API." };
+  }
+}
+function checkIfInvoiceExists(invoiceData) { const invoiceNumber = invoiceData.number || "б/н"; if (invoiceNumber === "б/н") { return false; } const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_PSD_LOG); if (!sheet || sheet.getLastRow() < 2) return false; return sheet.getRange("I2:I" + sheet.getLastRow()).getValues().flat().includes(invoiceNumber); }
+function addPsdToLog(chatId, invoiceData, photoLink) { const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_PSD_LOG); const lastRow = sheet.getLastRow(); let currentId = Number(lastRow > 1 ? sheet.getRange(lastRow, 1).getValue() : 0) || 0; const formattedDate = Utilities.formatDate(new Date(), SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone(), "dd.MM.yyyy"); const rowsToAdd = invoiceData.items.map(item => { currentId++; return [ currentId, formattedDate, invoiceData.objectName || "", item.code || "", "0", "", "", "Нет исполнителя", invoiceData.number || "б/н", invoiceData.date || "", "", photoLink, invoiceData.contractor || "", "", "", "" ]; }); if (rowsToAdd.length > 0) { sheet.getRange(lastRow + 1, 1, rowsToAdd.length, rowsToAdd[0].length).setValues(rowsToAdd); } return rowsToAdd.length; }
+
+// ======================================================================
+// --- МОДУЛЬ "НЕДЕЛЬНО-СУТОЧНЫЕ ГРАФИКИ (НСЗ)" - ПОЛНОСТЬЮ ОБНОВЛЕННЫЙ ---
+// ======================================================================
+
+function sendNsgMenu(chatId) {
+  const userRole = getUserRole(chatId);
+  let message = "Раздел: Недельно-суточное задание\n\n";
+  let keyboard;
+  
+  const dashboardUrl = ScriptApp.getService().getUrl() + "?view=dashboard&chatId=" + chatId;
+
+  if (userRole === 'ИНЖЕНЕР') {
+    const tasksOnApproval = getFormsByStatus(["На согласовании"]).length;
+    let reviewButtonText = "🔎 Планы на согласование" + (tasksOnApproval > 0 ? ` (${tasksOnApproval})` : '');
+
+    message += "Выберите действие:";
+    keyboard = { inline_keyboard: [
+      [{ text: reviewButtonText, callback_data: "nsg_review" }],
+      [{ text: "📊 Сводная таблица (WEB)", url: dashboardUrl }], 
+      [{ text: "⬅️ Главное меню", callback_data: "back_main" }]
+    ]};
+  } else {
+    message += "Выберите период для заполнения НСЗ или откройте сводную таблицу:";
+    const urlCurrent = ensureFormAndGetUrl(chatId, 0);
+    const urlNext = ensureFormAndGetUrl(chatId, 1);
+
+    keyboard = { inline_keyboard: [
+      [{ text: "📅 Текущая неделя", url: urlCurrent }, { text: "🔮 Следующая неделя", url: urlNext }],
+      [{ text: "📊 Сводная таблица (WEB)", url: dashboardUrl }], 
+      [{ text: "⬅️ Главное меню", callback_data: "back_main" }]
+    ]};
+  }
+  
+  sendMessage(chatId, message, keyboard);
+}
+
+function handleNsgCallback(chatId, data, state) { 
+    const parts = data.split('_'); 
+    const action = parts[1]; 
+    if (action === 'review') { 
+        sendNsgList(chatId, "Планы, ожидающие согласования:", getFormsByStatus(["На согласовании"])); 
+    }
+}
+
+function sendNsgList(chatId, message, forms){ 
+    if (forms.length === 0) { sendMessage(chatId, "Нет планов, соответствующих запросу."); return; } 
+    const buttons = forms.map(form => { 
+        const dateString = form.submission_date ? new Date(form.submission_date).toLocaleDateString() : 'черновик'; 
+        const text = `(${form.status}) от ${form.contractor || 'б/и'} - ${dateString}`; 
+        const urlWithChatId = form.link ? `${form.link.split('&chatId=')[0]}&chatId=${chatId}` : ''; 
+        return ([{ text: text, url: urlWithChatId }]); 
+    }); 
+    buttons.push([{ text: "⬅️ Назад в меню НСЗ", callback_data: "main_nsg" }]); 
+    sendMessage(chatId, message, { inline_keyboard: buttons }); 
+}
+
+// 1. ГЕНЕРАЦИЯ ССЫЛКИ (БЕЗ ЗАПИСИ В БД)
+function ensureFormAndGetUrl(chatId, weekOffset) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const today = new Date();
+  const day = today.getDay();
+  const diff = today.getDate() - day + (day == 0 ? -6 : 1); 
+  const monday = new Date(today);
+  monday.setDate(diff + (weekOffset * 7)); 
+  const mondayString = Utilities.formatDate(monday, ss.getSpreadsheetTimeZone(), "dd.MM.yyyy");
+
+  const existingFormId = findFormIdByDate(chatId, mondayString);
+  const webAppUrl = ScriptApp.getService().getUrl();
+
+  if (existingFormId) {
+    return webAppUrl + "?formId=" + existingFormId + "&chatId=" + chatId;
+  } else {
+    return webAppUrl + "?chatId=" + chatId + "&targetDate=" + mondayString;
+  }
+}
+
+// 2. ОТКРЫТИЕ СТРАНИЦЫ (doGet)
+function doGet(e) {
+  if (e.parameter.view === 'dashboard') {
+    const template = HtmlService.createTemplateFromFile('Dashboard');
+    template.chatId = e.parameter.chatId || '';
+    return template.evaluate().addMetaTag('viewport', 'width=device-width, initial-scale=1').setTitle('Панель управления НСЗ');
+  }
+  if (e.parameter.view === 'print' && e.parameter.formId) {
+    const t = HtmlService.createTemplateFromFile('PrintView'); t.formId = e.parameter.formId;
+    return t.evaluate().addMetaTag('viewport', 'width=device-width, initial-scale=1').setTitle('Печать НСЗ');
+  }
+
+  const chatId = e.parameter.chatId;
+  const targetDate = e.parameter.targetDate;
+  let formId = e.parameter.formId;
+
+  if (!formId && targetDate && chatId) {
+    formId = findFormIdByDate(chatId, targetDate);
+  }
+  
+  if (!formId) {
+    formId = Utilities.getUuid(); 
+  }
+
+  const record = getNsgRecord(formId);
+  
+  if (!record.target_monday && targetDate) {
+    record.target_monday = targetDate;
+  }
+
+  const template = HtmlService.createTemplateFromFile('NsgForm');
+  template.recordJson = JSON.stringify(record);
+  template.chatId = chatId || '';
+  template.formId = formId;
+  template.userRole = getUserRole(chatId);
+  
+  return template.evaluate().addMetaTag('viewport', 'width=device-width, initial-scale=1');
+}
+
+// 3. СОХРАНЕНИЕ ДАННЫХ
+function saveNsgData(formId, dataToSave, chatId) {
+  const userRole = getUserRole(chatId);
+  
+  if (dataToSave.action === 'submit_for_approval') {
+     let content = [];
+     try { content = JSON.parse(dataToSave.content); } catch(e){}
+     const hasData = content.length > 0 && content.some(item => item.workType || item.plan > 0 || item.fact > 0);
+     if (!hasData) {
+       return "❌ Ошибка: Нельзя отправить пустой план. Заполните хотя бы одну работу.";
+     }
+  }
+
+  const contractorInfo = getContractorInfo(chatId);
+  const contractorName = contractorInfo ? contractorInfo.name : "Подрядчик " + chatId;
+  
+  const baseData = {
+    contractor: contractorName,
+    contractor_id: chatId,
+    link: ScriptApp.getService().getUrl() + '?formId=' + formId,
+    submission_date: new Date()
+  };
+
+  if (dataToSave.target_monday) {
+    baseData.target_monday = dataToSave.target_monday;
+  }
+  
+  let finalData = { ...baseData, ...dataToSave }; 
+  let responseMessage = "Действие выполнено.";
+
+  if (dataToSave.action === 'submit_for_approval') {
+    finalData.status = "На согласовании";
+    finalData.engineer_comment = ""; 
+    updateNsgRecord(formId, finalData); 
+    getAllEngineers().forEach(id => 
+      sendMessage(id, `🔔 НСЗ: "${finalData.contractor}" прислал план на ${finalData.target_monday || 'неделю'}.\n\nОткрыть: ${finalData.link}&chatId=${id}`)
+    );
+    responseMessage = "План отправлен на согласование.";
+
+  } else if (dataToSave.action === 'approve' && userRole === 'ИНЖЕНЕР') {
+    updateNsgRecord(formId, { status: "Утвержден", engineer_comment: "" });
+    const rec = getNsgRecord(formId);
+    if(rec.contractor_id) String(rec.contractor_id).split(',').forEach(id => sendMessage(id.trim(), `✅ Ваш план НСЗ утвержден.`));
+    responseMessage = "План утвержден.";
+
+  } else if (dataToSave.action === 'rework' && userRole === 'ИНЖЕНЕР') {
+    updateNsgRecord(formId, { status: "На доработке", engineer_comment: dataToSave.engineer_comment });
+    const rec = getNsgRecord(formId);
+    if(rec.contractor_id) String(rec.contractor_id).split(',').forEach(id => sendMessage(id.trim(), `❗️ Ваш план НСЗ возвращен НА ДОРАБОТКУ.\n\nКомментарий: ${dataToSave.engineer_comment}`));
+    responseMessage = "План отправлен на доработку.";
+
+  } else if (dataToSave.action === 'save_fact') {
+    updateNsgRecord(formId, { content: dataToSave.content });
+    responseMessage = "Факт сохранен.";
+
+  } else if (dataToSave.action === 'archive' && userRole === 'ИНЖЕНЕР') {
+    archiveNsgData(formId);
+    updateNsgRecord(formId, { status: "Архивирован" });
+    responseMessage = "План успешно заархивирован.";
+  }
+
+  return responseMessage;
+}
+
+// 4. ЗАПИСЬ В ТАБЛИЦУ
+function updateNsgRecord(formId, dataToUpdate) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_NSG);
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(h => h.toLowerCase().trim());
+  const formIdColIndex = headers.indexOf("form_id");
+  
+  let rowIndex = -1;
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][formIdColIndex] === formId) {
+      rowIndex = i;
+      break;
+    }
+  }
+
+  if (rowIndex !== -1) {
+    headers.forEach((header, colIndex) => {
+      if (header in dataToUpdate) {
+        sheet.getRange(rowIndex + 1, colIndex + 1).setValue(dataToUpdate[header]);
+      }
+    });
+  } else {
+    // СОЗДАЕМ НОВУЮ (Append)
+    const newRow = headers.map(header => {
+      if (header === "form_id") return formId;
+      if (header in dataToUpdate) return dataToUpdate[header];
+      return "";
+    });
+    sheet.appendRow(newRow);
+  }
+}
+
+function archiveNsgData(formId) { 
+    const record = getNsgRecord(formId); 
+    if (!record || !record.content) return; 
+    const archiveSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("Архив НСЗ"); 
+    const lastRow = archiveSheet.getLastRow(); 
+    let currentId = Number(lastRow > 0 ? archiveSheet.getRange(lastRow, 1).getValue() : 0) || 0; 
+    const archiveDate = new Date(); 
+    try { 
+        const data = JSON.parse(record.content); 
+        if(!Array.isArray(data)) return; 
+        const rowsToAdd = data.map(item => {
+            currentId++;
+            return [
+              currentId, record.form_id, record.contractor, item.date,
+              item.workType || '', item.unit || '', item.project,
+              item.plan, item.fact, archiveDate
+            ];
+        }); 
+        if(rowsToAdd.length > 0){ archiveSheet.getRange(lastRow + 1, 1, rowsToAdd.length, rowsToAdd[0].length).setValues(rowsToAdd); } 
+    } catch(e) {
+      logToSheet("ERROR", "Ошибка архивации: " + e.toString());
+      Logger.log("Ошибка архивации: " + e.toString());
+    }
+}
+
+function getNsgRecord(formId) { 
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_NSG); 
+    const data = sheet.getDataRange().getValues(); 
+    const headers = data[0].map(h => h.toLowerCase().trim()); 
+    const formIdColIndex = headers.indexOf("form_id"); 
+    for (let i = 1; i < data.length; i++) { 
+        if (data[i][formIdColIndex] === formId) { 
+            const record = {}; 
+            headers.forEach((header, index) => { record[header] = data[i][index]; }); 
+            return record; 
+        } 
+    } 
+    return { formId: formId, status: "Черновик" }; 
+}
+
+function getFormsByStatus(statuses, contractorFilter = null) { 
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_NSG); 
+    const data = sheet.getDataRange().getValues(); 
+    const headers = data[0].map(h => h.toLowerCase().trim()); 
+    const statusCol = headers.indexOf("status"), contractorCol = headers.indexOf("contractor"); 
+    const forms = []; 
+    for (let i = 1; i < data.length; i++) { 
+        const row = data[i], status = row[statusCol], contractor = row[contractorCol]; 
+        if (statuses.includes(status)) { 
+            if (contractorFilter && contractor !== contractorFilter) continue; 
+            const record = {}; headers.forEach((h, j) => { record[h] = row[j]; }); forms.push(record); 
+        } 
+    } 
+    return forms; 
+}
+
+function getAllEngineers(){ 
+    const accessSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_ACCESS); 
+    return accessSheet.getRange("B2:B" + accessSheet.getLastRow()).getValues().flat().filter(String); 
+}
+
+function findFormIdByDate(chatId, dateString) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_NSG);
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(h => String(h).toLowerCase().trim());
+  const colContractorId = headers.indexOf("contractor_id");
+  const colTargetMonday = headers.indexOf("target_monday");
+  const colId = headers.indexOf("form_id");
+
+  if (colTargetMonday === -1) return null;
+
+  for (let i = 1; i < data.length; i++) {
+    const rowChatId = String(data[i][colContractorId]);
+    const rowDate = data[i][colTargetMonday];
+    let rowDateStr = rowDate;
+    if (rowDate instanceof Date) {
+      rowDateStr = Utilities.formatDate(rowDate, SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone(), "dd.MM.yyyy");
+    }
+    if (rowChatId.includes(String(chatId)) && String(rowDateStr) === String(dateString)) {
+      return data[i][colId];
+    }
+  }
+  return null;
+}
+
+function getDashboardData(chatId) {
+  const userRole = getUserRole(chatId); 
+  const isEngineer = (userRole === 'ИНЖЕНЕР');
+
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME_NSG);
+  const data = sheet.getDataRange().getValues();
+  const headers = data[0].map(h => String(h).toLowerCase().trim());
+  
+  // Индексы колонок
+  const colId = headers.indexOf("form_id");
+  const colContractor = headers.indexOf("contractor");
+  const colContractorId = headers.indexOf("contractor_id");
+  const colStatus = headers.indexOf("status");
+  const colMonday = headers.indexOf("target_monday");
+  const colContent = headers.indexOf("content"); // Добавили индекс контента
+  
+  // Вычисляем даты недель (обнуляем время)
+  const today = new Date();
+  const day = today.getDay();
+  const diff = today.getDate() - day + (day == 0 ? -6 : 1);
+  const currentMonday = new Date(today); currentMonday.setDate(diff); currentMonday.setHours(0,0,0,0);
+  
+  const nextMonday = new Date(currentMonday);
+  nextMonday.setDate(currentMonday.getDate() + 7);
+  
+  const result = { current: [], next: [] };
+  const formatter = Utilities.formatDate;
+  const timezone = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+
+  // Начинаем с i=1 (пропускаем шапку)
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    
+    // 1. Фильтрация по правам (Подрядчик видит только свое)
+    if (!isEngineer) {
+       const rowChatId = String(row[colContractorId]);
+       if (!rowChatId.includes(String(chatId))) continue;
+    }
+
+    // 2. ОПРЕДЕЛЕНИЕ ДАТЫ (Улучшенная логика)
+    let rowDate = null;
+    const rowDateRaw = row[colMonday];
+
+    // ВАРИАНТ А: Берем из колонки target_monday (если есть)
+    if (rowDateRaw instanceof Date) {
+        rowDate = rowDateRaw;
+    } else if (typeof rowDateRaw === 'string' && rowDateRaw.trim() !== "") {
+        const parts = rowDateRaw.split('.');
+        if(parts.length===3) rowDate = new Date(parts[2], parts[1]-1, parts[0]);
+    }
+
+    // ВАРИАНТ Б: Если в target_monday пусто, пытаемся вытащить из JSON Content
+    if (!rowDate && colContent > -1 && row[colContent]) {
+        try {
+            const json = JSON.parse(row[colContent]);
+            // Если это массив и там есть хоть одна запись с датой
+            if (Array.isArray(json) && json.length > 0 && json[0].date) {
+                // Парсим дату вида "15.12.2025"
+                const parts = json[0].date.split('.');
+                const workDate = new Date(parts[2], parts[1]-1, parts[0]);
+                
+                // Вычисляем понедельник этой даты
+                const wdDay = workDate.getDay();
+                const wdDiff = workDate.getDate() - wdDay + (wdDay == 0 ? -6 : 1);
+                rowDate = new Date(workDate.setDate(wdDiff));
+            }
+        } catch (e) {
+            // Если JSON битый, просто пропускаем
+        }
+    }
+    
+    // Если дату так и не нашли - пропускаем строку
+    if (!rowDate) continue; 
+    
+    // Обнуляем время для корректного сравнения
+    rowDate.setHours(0,0,0,0);
+
+    const item = {
+      formId: row[colId],
+      contractor: row[colContractor],
+      status: row[colStatus],
+      dateStr: formatter(rowDate, timezone, "dd.MM.yyyy")
+    };
+
+    // 3. Распределение по вкладкам
+    if (rowDate.getTime() === currentMonday.getTime()) {
+      result.current.push(item);
+    } else if (rowDate.getTime() === nextMonday.getTime()) {
+      result.next.push(item);
+    }
+  }
+  
+  return result;
+}
+
+function getPrintData(formId) { return getNsgRecord(formId); }
+
+function sendMainMenu(chatId) {
+  const userRole = getUserRole(chatId);
+  let keyboardButtons = [[{ text: "👷 Численность" }, { text: "🎯 Целевые задания" }],
+    [{ text: "🗓️ Недельно-суточное задание" }, { text: "❓ Вопросы" }]];
+  let thirdRow = [{ text: "☀️ Погода" }];
+  if (userRole === "ИНЖЕНЕР") { thirdRow.push({ text: "📄 Добавить ПСД" }); } else { thirdRow.push({ text: "⠀" }); }
+  keyboardButtons.push(thirdRow);
+  keyboardButtons.push([{ text: "АО \"Прокатмонтаж\" Гостиница" }]);
+  const keyboard = { keyboard: keyboardButtons, resize_keyboard: true, is_persistent: true };
+  sendMessage(chatId, "Добро пожаловать! Выберите раздел:", keyboard);
+}
+
+function sendMessage(chatId, text, keyboard) {
+  try {
+    const payload = {
+      'method': 'sendMessage',
+      'chat_id': String(chatId),
+      'text': text,
+      'parse_mode': 'HTML',
+      'disable_web_page_preview': true
+    };
+    if (keyboard) {
+      payload.reply_markup = JSON.stringify(keyboard);
+    }
+    const options = {
+      'method': 'post',
+      'contentType': 'application/json',
+      'payload': JSON.stringify(payload),
+      'muteHttpExceptions': true
+    };
+    const response = UrlFetchApp.fetch(TELEGRAM_URL + "/", options);
+    const responseCode = response.getResponseCode();
+    if (responseCode !== 200) {
+      logToSheet("ERROR", `Failed to send message to ${chatId}. Code: ${responseCode}. Response: ${response.getContentText()}`);
+    }
+  } catch (err) {
+    logToSheet("ERROR", "SEND MESSAGE ERROR: " + err.toString());
+    Logger.log("SEND MESSAGE ERROR: " + err.toString());
+  }
+}

@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f4f6f9; padding: 15px; margin: 0; }
+    h1 { text-align: center; color: #333; font-size: 20px; margin-bottom: 20px; }
+    
+    /* Табы */
+    .tabs { display: flex; justify-content: center; margin-bottom: 20px; box-shadow: 0 2px 5px rgba(0,0,0,0.05); border-radius: 8px; overflow: hidden; }
+    .tab { flex: 1; padding: 12px; text-align: center; cursor: pointer; background: white; font-weight: 500; font-size: 14px; color: #555; border-bottom: 3px solid transparent; transition: all 0.3s; }
+    .tab.active { background: #eef2f7; color: #007bff; border-bottom: 3px solid #007bff; }
+    
+    .list-container { display: none; }
+    .list-container.active { display: block; }
+    
+    /* Карточка плана */
+    .card { background: white; padding: 15px; margin-bottom: 15px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); border-left: 6px solid #ccc; display: flex; flex-direction: column; gap: 10px; }
+    
+    .card-header { display: flex; justify-content: space-between; align-items: start; }
+    .card-info { flex-grow: 1; }
+    .card-contractor { font-weight: bold; font-size: 15px; color: #333; margin-bottom: 4px; }
+    .card-meta { font-size: 13px; color: #666; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    
+    /* Кнопки действий внутри карточки */
+    .card-actions { display: flex; gap: 10px; margin-top: 5px; border-top: 1px solid #eee; padding-top: 10px; }
+    .btn-action { flex: 1; padding: 10px; border-radius: 6px; border: none; font-size: 14px; cursor: pointer; font-weight: 500; display: flex; align-items: center; justify-content: center; gap: 5px; transition: background 0.2s; text-decoration: none; color: white; }
+    
+    /* Цвета кнопок */
+    .btn-print { background-color: #28a745; } /* Зеленая для таблицы */
+    .btn-print:hover { background-color: #218838; }
+    
+    .btn-edit { background-color: #007bff; } /* Синяя для формы */
+    .btn-edit:hover { background-color: #0069d9; }
+
+    /* Бейджи статусов */
+    .status-badge { padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: bold; color: white; text-transform: uppercase; }
+    
+    .border-Черновик { border-color: #6c757d; } .bg-Черновик { background-color: #6c757d; }
+    .border-На.согласовании { border-color: #ffc107; } .bg-На.согласовании { background-color: #ffc107; color: #333; }
+    .border-Утвержден { border-color: #28a745; } .bg-Утвержден { background-color: #28a745; }
+    .border-На.доработке { border-color: #dc3545; } .bg-На.доработке { background-color: #dc3545; }
+    .border-Архивирован { border-color: #343a40; } .bg-Архивирован { background-color: #343a40; }
+
+    .loading { text-align: center; color: #777; padding: 30px; font-style: italic; }
+    .empty-state { text-align: center; padding: 40px 20px; color: #999; }
+  </style>
+</head>
+<body>
+
+  <script>
+    const currentChatId = '<?= chatId ?>';
+    const scriptUrl = '<?= ScriptApp.getService().getUrl() ?>';
+  </script>
+
+  <h1>📊 Сводная таблица НСЗ</h1>
+  
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('current')">Текущая неделя</div>
+    <div class="tab" onclick="switchTab('next')">Следующая неделя</div>
+  </div>
+
+  <div id="list-current" class="list-container active">
+    <div class="loading">Загрузка данных...</div>
+  </div>
+
+  <div id="list-next" class="list-container">
+    <div class="loading">Загрузка данных...</div>
+  </div>
+
+  <script>
+    function switchTab(tabName) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.list-container').forEach(l => l.classList.remove('active'));
+      
+      const targetTab = document.querySelectorAll(`.tab`)[tabName === 'current' ? 0 : 1];
+      targetTab.classList.add('active');
+      document.getElementById('list-' + tabName).classList.add('active');
+    }
+
+    // Загружаем данные с сервера
+    google.script.run
+      .withSuccessHandler(renderDashboard)
+      .withFailureHandler(showError)
+      .getDashboardData(currentChatId);
+
+    function renderDashboard(data) {
+      renderList('list-current', data.current);
+      renderList('list-next', data.next);
+    }
+    
+    function showError(err) {
+       document.querySelectorAll('.list-container').forEach(el => el.innerHTML = `<div style="color:red; text-align:center;">Ошибка: ${err.message}</div>`);
+    }
+
+    function renderList(elementId, items) {
+      const container = document.getElementById(elementId);
+      container.innerHTML = '';
+      
+      if (!items || items.length === 0) {
+        container.innerHTML = '<div class="empty-state">Нет планов на этот период</div>';
+        return;
+      }
+
+      items.forEach(item => {
+        // Убираем пробелы из статуса для CSS классов
+        const safeStatus = item.status.replace(/\s+/g, '.'); 
+        
+        const card = document.createElement('div');
+        card.className = `card border-${safeStatus}`;
+        
+        // Генерируем ссылки
+        const urlPrint = scriptUrl + "?view=print&formId=" + item.formId;
+        const urlEdit = scriptUrl + "?formId=" + item.formId + "&chatId=" + currentChatId;
+
+        card.innerHTML = `
+          <div class="card-header">
+            <div class="card-info">
+                <div class="card-contractor">${item.contractor}</div>
+                <div class="card-meta">
+                   <span class="status-badge bg-${safeStatus}">${item.status}</span>
+                   <span>🗓 ${item.dateStr}</span>
+                </div>
+            </div>
+          </div>
+          
+          <!-- ДВЕ КНОПКИ: ОДНА ДЛЯ ТАБЛИЦЫ, ДРУГАЯ ДЛЯ РЕДАКТИРОВАНИЯ -->
+          <div class="card-actions">
+             <button class="btn-action btn-print" onclick="window.open('${urlPrint}', '_blank')">
+                📄 Просмотр
+             </button>
+             <button class="btn-action btn-edit" onclick="window.open('${urlEdit}', '_blank')">
+                📝 Редактировать
+             </button>
+          </div>
+        `;
+        container.appendChild(card);
+      });
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <base target="_top">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 15px; background-color: #f0f0f0; }
+        h2, p { text-align: center; margin: 5px 0 15px 0; }
+        .day-block { background-color: #fff; border-radius: 8px; margin-bottom: 15px; padding: 15px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .day-header { font-weight: bold; font-size: 1.1em; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; }
+        .work-item { border-top: 1px solid #eee; padding-top: 15px; margin-top: 15px; }
+        .work-item:first-child { border-top: none; margin-top: 0; padding-top: 0; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { text-align: left; padding: 8px; font-size: 0.9em; }
+        th { color: #555; }
+        select, input { width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc; box-sizing: border-box; }
+        input:disabled, select:disabled { background-color: #e9ecef; color: #6c757d; cursor: not-allowed; }
+        .form-group { margin-bottom: 10px; }
+        .add-work-btn { font-size: 12px; padding: 5px 10px; cursor: pointer; border-radius: 4px; border: 1px solid #007bff; background-color: #fff; color: #007bff; }
+        .add-work-btn:disabled { background-color: #e9ecef; border-color: #ccc; color: #6c757d; cursor: not-allowed; }
+        .action-button { display: block; width: 100%; padding: 15px; font-size: 1.1em; font-weight: bold; color: white; border: none; border-radius: 8px; cursor: pointer; margin-top: 10px; }
+        #btn-submit { background-color: #007bff; }
+        #btn-save-fact { background-color: #28a745; }
+        #btn-approve { background-color: #28a745; }
+        #btn-rework { background-color: #ffc107; color: #000; }
+        #btn-archive { background-color: #6c757d; }
+        .action-button:disabled { background-color: #999; cursor: not-allowed; }
+        .status-bar { padding: 10px; border-radius: 5px; text-align: center; font-weight: bold; margin-bottom: 15px; }
+        .status-Черновик, .status-На.доработке { background-color: #e9ecef; color: #000; }
+        .status-На.согласовании { background-color: #fff3cd; color: #856404; }
+        .status-Утвержден { background-color: #d4edda; color: #155724; }
+        .status-Архивирован { background-color: #d6d8db; color: #383d41;}
+        .comment-block { background-color: #f8d7da; padding: 10px; border-radius: 5px; margin-bottom: 15px; border: 1px solid #f5c6cb; }
+    </style>
+</head>
+<body>
+    <script>
+        const record = JSON.parse('<?= recordJson ?>');
+        const currentChatId = '<?= chatId ?>';
+        const currentFormId = '<?= formId ?>';
+        const userRole = '<?= userRole ?>'; 
+        const isEngineer = (userRole === 'ИНЖЕНЕР');
+    </script>
+
+    <h2 id="form-title">План работ на неделю</h2>
+    <p id="week-dates" style="font-weight: bold; color: #007bff;"></p>
+    <p style="font-size: 12px; color: #555;">ID: <?= formId ?></p>
+
+    <div id="status-bar"></div>
+    <div id="comment-container"></div>
+    <div id="form-container"></div>
+    <div id="actions-container"></div>
+    
+    <script>
+    const units = ["тн.", "м.", "м2", "м3", "шт.", "компл."];
+    const unitOptions = units.map(u => `<option value="${u}">${u}</option>`).join('');
+    const statusDiv = document.getElementById('status-bar');
+    let globalFormData = [];
+
+    window.onload = function() {
+        if (record.content) {
+            try { globalFormData = JSON.parse(record.content); } catch (e) { globalFormData = []; }
+        }
+
+        let startMondayDate = null;
+        if (record.target_monday) {
+            startMondayDate = parseAnyDate(record.target_monday);
+        }
+        if (!startMondayDate || isNaN(startMondayDate.getTime())) {
+            if (globalFormData.length > 0 && globalFormData[0].date) {
+                startMondayDate = parseAnyDate(globalFormData[0].date);
+                const day = startMondayDate.getDay();
+                const diff = startMondayDate.getDate() - day + (day == 0 ? -6 : 1);
+                startMondayDate.setDate(diff);
+            } else {
+                const today = new Date();
+                const day = today.getDay();
+                const diff = today.getDate() - day + (day == 0 ? -6 : 1);
+                startMondayDate = new Date(today.setDate(diff));
+            }
+        }
+
+        const endDate = new Date(startMondayDate);
+        endDate.setDate(startMondayDate.getDate() + 6);
+        document.getElementById('week-dates').innerText = `${formatDate(startMondayDate)} — ${formatDate(endDate)}`;
+
+        buildFormByMonday(startMondayDate);
+        updateUiByStatus();
+    };
+
+    function parseAnyDate(dateInput) {
+        if (!dateInput) return null;
+        if (typeof dateInput === 'object' && dateInput instanceof Date) return dateInput;
+        const str = String(dateInput);
+        if (str.match(/^\d{2}\.\d{2}\.\d{4}$/)) {
+            const parts = str.split('.');
+            return new Date(parts[2], parts[1]-1, parts[0]);
+        }
+        const isoDate = new Date(str);
+        if (!isNaN(isoDate.getTime())) return isoDate;
+        return null;
+    }
+    function formatDate(date) { return ('0' + date.getDate()).slice(-2) + '.' + ('0' + (date.getMonth() + 1)).slice(-2) + '.' + date.getFullYear(); }
+
+    function buildFormByMonday(mondayDate) {
+        const formContainer = document.getElementById('form-container');
+        formContainer.innerHTML = '';
+        const dates = [];
+        for (let i = 0; i < 7; i++) {
+            const currentDate = new Date(mondayDate);
+            currentDate.setDate(mondayDate.getDate() + i);
+            const dayNames = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
+            dates.push({ name: dayNames[currentDate.getDay()], date: formatDate(currentDate) });
+        }
+        dates.forEach(day => {
+            const dayBlock = document.createElement('div');
+            dayBlock.className = 'day-block';
+            dayBlock.dataset.date = day.date;
+            dayBlock.innerHTML = `
+                <div class="day-header"><span>${day.name}, ${day.date.substring(0,5)}</span><button class="add-work-btn" onclick="addWorkItem('${day.date}')">➕ Добавить работу</button></div>
+                <div class="works-container"></div>`;
+            formContainer.appendChild(dayBlock);
+            const worksForDay = globalFormData.filter(item => item.date === day.date);
+            if (worksForDay.length > 0) { worksForDay.forEach(work => addWorkItem(day.date, work)); } else { addWorkItem(day.date); }
+        });
+    }
+
+    function addWorkItem(date, data = {}) {
+        const container = document.querySelector(`.day-block[data-date="${date}"] .works-container`);
+        if (!container) return; 
+        const workItem = document.createElement('div');
+        workItem.className = 'work-item';
+        workItem.innerHTML = `
+            <div class="form-group"><input type="text" class="day-work-type" placeholder="Вид работ (впишите вручную)..."></div>
+            <div class="form-group"><select class="day-unit"><option value="">- Ед. изм. -</option>${unitOptions}</select></div>
+            <div class="form-group"><input type="text" class="day-project" placeholder="Название проекта..."></div>
+            <table><thead><tr><th>План</th><th>Факт</th></tr></thead><tbody><tr><td><input type="number" class="plan-volume" placeholder="Объем"></td><td><input type="number" class="fact-volume" placeholder="-"></td></tr></tbody></table>`;
+        container.appendChild(workItem);
+        if (data) {
+            workItem.querySelector('.day-work-type').value = data.workType || '';
+            if (data.unit) workItem.querySelector('.day-unit').value = data.unit;
+            workItem.querySelector('.day-project').value = data.project || '';
+            workItem.querySelector('.plan-volume').value = data.plan || '';
+            workItem.querySelector('.fact-volume').value = data.fact || '';
+        }
+    }
+
+    function updateGlobalDataFromDOM() {
+        globalFormData = [];
+        document.querySelectorAll('.day-block').forEach(block => {
+            block.querySelectorAll('.work-item').forEach(item => {
+                const plan = item.querySelector('.plan-volume').value;
+                const fact = item.querySelector('.fact-volume').value;
+                const workType = item.querySelector('.day-work-type').value;
+                if (plan || fact || workType) {
+                    globalFormData.push({ date: block.dataset.date, workType: workType, unit: item.querySelector('.day-unit').value, project: item.querySelector('.day-project').value, plan: plan, fact: fact });
+                }
+            });
+        });
+    }
+
+    function collectData() { updateGlobalDataFromDOM(); return JSON.stringify(globalFormData); }
+
+    function updateUiByStatus() {
+        const status = record.status;
+        const actionsContainer = document.getElementById('actions-container');
+        let html = '';
+        statusDiv.innerText = status;
+        statusDiv.className = `status-bar status-${status.replace(/\s+/g, '.')}`;
+        const inputs = document.querySelectorAll('.day-work-type, .day-unit, .day-project, .plan-volume, .fact-volume');
+        const addButtons = document.querySelectorAll('.add-work-btn');
+        inputs.forEach(el => el.disabled = true);
+        addButtons.forEach(el => el.disabled = true);
+        switch (status) {
+            case "Черновик":
+            case "На доработке":
+                if (!isEngineer) {
+                    document.querySelectorAll('.day-work-type, .day-unit, .day-project, .plan-volume').forEach(el => el.disabled = false);
+                    addButtons.forEach(el => el.disabled = false);
+                    html = `<button id="btn-submit" class="action-button" onclick="submitForApproval()">Отправить на согласование</button>`;
+                }
+                if (status === "На доработке" && record.engineer_comment) { document.getElementById('comment-container').innerHTML = `<div class="comment-block"><b>Комментарий инженера:</b> ${record.engineer_comment}</div>`; }
+                break;
+            case "На согласовании":
+                if (isEngineer) {
+                    html = `<button id="btn-approve" class="action-button" onclick="approvePlan()">Утвердить</button><button id="btn-rework" class="action-button" onclick="sendForRework()">На доработку</button>`;
+                } else { statusDiv.innerText += " (ожидайте проверки инженером)"; }
+                break;
+            case "Утвержден":
+                if (!isEngineer) {
+                    document.querySelectorAll('.fact-volume').forEach(el => el.disabled = false);
+                    html = `<button id="btn-save-fact" class="action-button" onclick="saveFact()">Сохранить факт</button>`;
+                } else { html = `<button id="btn-archive" class="action-button" onclick="archivePlan()">Архивировать план</button>`; }
+                break;
+        }
+        actionsContainer.innerHTML = html;
+    }
+
+    function submitForApproval() {
+        if (!confirm("Вы уверены, что хотите отправить план на согласование?")) return;
+        const data = { action: 'submit_for_approval', content: collectData(), target_monday: record.target_monday || new URLSearchParams(window.location.search).get('targetDate') };
+        runServerFunction(data);
+    }
+    function approvePlan() { runServerFunction({ action: 'approve' }); }
+    function sendForRework() { const comment = prompt("Введите причину возврата:", ""); if (comment && comment.trim() !== "") { runServerFunction({ action: 'rework', engineer_comment: comment }); } }
+    function saveFact(){ runServerFunction({ action: 'save_fact', content: collectData() }); }
+    function archivePlan(){ if (!confirm("Архивировать?")) return; runServerFunction({ action: 'archive' }); }
+
+    function runServerFunction(dataToSave) {
+        document.querySelectorAll('.action-button').forEach(b => b.disabled = true);
+        google.script.run
+            .withSuccessHandler(response => { alert(response); window.location.reload(); })
+            .withFailureHandler(error => { alert("Ошибка: " + error.message); document.querySelectorAll('.action-button').forEach(b => b.disabled = false); })
+            .saveNsgData(currentFormId, dataToSave, currentChatId);
+    }
+    </script>
+</body>
+</html>
