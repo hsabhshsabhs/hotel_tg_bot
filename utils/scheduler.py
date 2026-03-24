@@ -33,12 +33,12 @@ def should_send_reminder():
             logger.warning("⚠️ Лист 'Численность расширенная' пуст или слишком мал")
             return
         
-        headers = extended_data[0]  # Строка 1: Подрядчик, Направление, Смена, Уведомление, даты...
-        rows = extended_data[1:]     # Данные
+        headers = extended_data[0]
+        rows = extended_data[1:]
         
         today = datetime.now()
-        today_short = today.strftime('%d.%m.%y')  # "24.03.26"
-        today_full = today.strftime('%d.%m.%Y')   # "24.03.2026"
+        today_short = today.strftime('%d.%m.%y')
+        today_full = today.strftime('%d.%m.%Y')
         
         # Ищем колонку с сегодняшней датой
         today_col_idx = None
@@ -49,16 +49,13 @@ def should_send_reminder():
         
         if today_col_idx is None:
             logger.warning(f"⚠️ Сегодняшняя дата ({today_short}) не найдена в заголовках")
-            # Пробуем последнюю колонку с датой
             for i in range(len(headers) - 1, -1, -1):
                 if headers[i] and '.' in str(headers[i]):
                     today_col_idx = i
-                    logger.info(f"Используем последнюю доступную дату: {headers[i]}")
                     break
         
-        # Собираем данные: только организации с Уведомление=TRUE
+        # Находим индексы колонок
         org_col_idx = None
-        direction_col_idx = None
         shift_col_idx = None
         notification_col_idx = None
         
@@ -66,8 +63,6 @@ def should_send_reminder():
             h_clean = str(h).strip().lower() if h else ''
             if 'подрядчик' in h_clean:
                 org_col_idx = i
-            elif 'направлен' in h_clean:
-                direction_col_idx = i
             elif 'смена' in h_clean:
                 shift_col_idx = i
             elif 'уведомлен' in h_clean:
@@ -77,8 +72,8 @@ def should_send_reminder():
             logger.error("⚠️ Не найдены все необходимые колонки в листе")
             return
         
-        # Группируем по организациям
-        orgs_data = {}  # {org_name: { подано: bool, день: int, ночь: int }}
+        # Собираем данные
+        orgs_data = {}
         
         for row in rows:
             if not row or len(row) <= notification_col_idx:
@@ -88,21 +83,15 @@ def should_send_reminder():
             if not org_name:
                 continue
             
-            # Проверяем флаг мониторинга
             notif_val = row[notification_col_idx].strip().upper() if notification_col_idx < len(row) and row[notification_col_idx] else 'FALSE'
             is_monitored = notif_val in ('TRUE', '1', 'ДА', 'YES')
             
             if not is_monitored:
-                continue  # Пропускаем организации без галочки
+                continue
             
-            # Получаем данные за сегодня
             today_val = row[today_col_idx].strip() if today_col_idx < len(row) and row[today_col_idx] else ''
+            shift = row[shift_col_idx].strip() if shift_col_idx and shift_col_idx < len(row) and row[shift_col_idx] else ''
             
-            shift = ''
-            if shift_col_idx and shift_col_idx < len(row) and row[shift_col_idx]:
-                shift = row[shift_col_idx].strip()
-            
-            # Парсим численность
             try:
                 day_value = float(today_val.replace(',', '.')) if today_val else 0
             except (ValueError, AttributeError):
@@ -117,31 +106,32 @@ def should_send_reminder():
                 orgs_data[org_name]['день'] += day_value
         
         # Формируем сообщение
-        message = f"📊 <b>Сводка по численности за {today.strftime('%d.%m.%Y')}</b>\n\n"
+        message = f"📊 СВОДКА ПО ЧИСЛЕННОСТИ на {today.strftime('%d.%m.%Y')}\n\n"
         
         if not orgs_data:
             message += "⚠️ Нет организаций с активным мониторингом уведомлений"
         else:
-            total_day = sum(d['день'] for d in orgs_data.values())
-            total_night = sum(d['ночь'] for d in orgs_data.values())
-            total = total_day + total_night
+            has_data = {org: d for org, d in orgs_data.items() if d['день'] > 0 or d['ночь'] > 0}
+            no_data = {org: d for org, d in orgs_data.items() if d['день'] == 0 and d['ночь'] == 0}
             
-            message += f"📈 <b>Всего: {int(total)} чел.</b> (☀️ {int(total_day)} / 🌙 {int(total_night)})\n\n"
+            message += "ПОДАЛИ ДАННЫЕ:\n"
+            for org, data in sorted(has_data.items()):
+                d = int(data['день'])
+                n = int(data['ночь'])
+                message += f"  ✅ {org}: {d}/{n} чел.\n"
             
-            for org, data in sorted(orgs_data.items()):
-                day = int(data['день'])
-                night = int(data['ночь'])
-                if day > 0 or night > 0:
-                    message += f"✅ {org}: ☀️{day} / 🌙{night}\n"
-                else:
-                    message += f"❌ {org}: <i>нет данных</i>\n"
+            message += "\nНЕ ПОДАЛИ:\n"
+            for org, data in sorted(no_data.items()):
+                message += f"  ❌ {org}\n"
         
-        message += f"\n⏰ {today.strftime('%H:%M')}\n\n📱 Для подачи численности используйте [ТГ-бота](**>>> ПЕРЕЙТИ В ТЕЛЕГРАМ БОТА <<<**)"
+        message += f"\nЧтобы подать численность используйте Телеграм бота:\n"
+        message += f">>> ПЕРЕЙТИ В ТЕЛЕГРАМ БОТА <<<\n"
+        message += "======================================================="
         
         # Отправляем в группу
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(bot.send_message(chat_id=GROUP_CHAT_ID, text=message, parse_mode='HTML'))
+        loop.run_until_complete(bot.send_message(chat_id=GROUP_CHAT_ID, text=message))
         loop.close()
         
         logger.info(f"✅ Сводка отправлена в группу {GROUP_CHAT_ID}")
@@ -154,7 +144,6 @@ def setup_scheduler():
     """Настраивает и запускает планировщик"""
     scheduler = BackgroundScheduler(timezone='Asia/Yekaterinburg')
     
-    # Сводка в 9:00, 9:30, 10:00
     for hour, minute in [(9, 0), (9, 30), (10, 0)]:
         scheduler.add_job(
             should_send_reminder,
