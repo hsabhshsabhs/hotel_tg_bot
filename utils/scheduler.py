@@ -136,7 +136,7 @@ def should_send_reminder():
                 else:
                     message += f"❌ {org}: <i>нет данных</i>\n"
         
-        message += f"\n⏰ {today.strftime('%H:%M')}\n\n📱 Для подачи численности используйте [ТГ-бота](https://t.me/pm_hotel_v3_bot)"
+        message += f"\n⏰ {today.strftime('%H:%M')}\n\n📱 Для подачи численности используйте [ТГ-бота](**>>> ПЕРЕЙТИ В ТЕЛЕГРАМ БОТА <<<**)"
         
         # Отправляем в группу
         loop = asyncio.new_event_loop()
