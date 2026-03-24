@@ -7,164 +7,161 @@ from telegram import Bot
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from config import TELEGRAM_BOT_TOKEN, GROUP_CHAT_ID, SHEET_NAMES
 from services.google_sheets import GoogleSheetsService
+from config import SHEET_NAMES, TELEGRAM_BOT_TOKEN, GROUP_CHAT_ID
 from logger import logger
 
 
-def send_headcount_summary():
-    """Отправить сводку по численности в группу"""
+def is_monitoring_org(org_row, idx):
+    """Проверяет, мониторится ли организация (есть галочка в колонке Уведомление)"""
     try:
-        sheets_service = GoogleSheetsService()
+        val = org_row[idx].strip().upper()
+        return val == 'TRUE' or val == '1' or val == 'ДА' or val == 'YES'
+    except (IndexError, AttributeError):
+        return False
+
+
+def should_send_reminder():
+    """Отправляет сводку по численности в группу"""
+    try:
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
         
-        # Читаем из "Численность расширенная" - там есть колонка Уведомление
-        headcount_data = sheets_service.get_values(SHEET_NAMES.get('HEADCOUNT_EXTENDED', 'Численность расширенная'))
+        sheets = GoogleSheetsService()
+        extended_data = sheets.get_values(SHEET_NAMES['HEADCOUNT_EXTENDED'])
         
-        if not headcount_data or len(headcount_data) < 2:
-            logger.warning("Нет данных в листе Численность расширенная")
+        if not extended_data or len(extended_data) < 2:
+            logger.warning("⚠️ Лист 'Численность расширенная' пуст или слишком мал")
             return
+        
+        headers = extended_data[0]  # Строка 1: Подрядчик, Направление, Смена, Уведомление, даты...
+        rows = extended_data[1:]     # Данные
+        
+        today = datetime.now()
+        today_short = today.strftime('%d.%m.%y')  # "24.03.26"
+        today_full = today.strftime('%d.%m.%Y')   # "24.03.2026"
         
         # Ищем колонку с сегодняшней датой
-        header = headcount_data[0]
-        today = datetime.now().strftime('%d.%m.%Y')
-        
-        today_idx = None
-        for i, val in enumerate(header):
-            if str(val).strip() == today:
-                today_idx = i
+        today_col_idx = None
+        for i, h in enumerate(headers):
+            if h and (h.strip() == today_short or h.strip() == today_full):
+                today_col_idx = i
                 break
         
-        if today_idx is None:
-            logger.warning(f"Сегодняшняя дата {today} не найдена в заголовках")
+        if today_col_idx is None:
+            logger.warning(f"⚠️ Сегодняшняя дата ({today_short}) не найдена в заголовках")
+            # Пробуем последнюю колонку с датой
+            for i in range(len(headers) - 1, -1, -1):
+                if headers[i] and '.' in str(headers[i]):
+                    today_col_idx = i
+                    logger.info(f"Используем последнюю доступную дату: {headers[i]}")
+                    break
+        
+        # Собираем данные: только организации с Уведомление=TRUE
+        org_col_idx = None
+        direction_col_idx = None
+        shift_col_idx = None
+        notification_col_idx = None
+        
+        for i, h in enumerate(headers):
+            h_clean = str(h).strip().lower() if h else ''
+            if 'подрядчик' in h_clean:
+                org_col_idx = i
+            elif 'направлен' in h_clean:
+                direction_col_idx = i
+            elif 'смена' in h_clean:
+                shift_col_idx = i
+            elif 'уведомлен' in h_clean:
+                notification_col_idx = i
+        
+        if org_col_idx is None or notification_col_idx is None or today_col_idx is None:
+            logger.error("⚠️ Не найдены все необходимые колонки в листе")
             return
         
-        # Собираем данные по организациям
-        # Колонки: D=Подрядчик(3), E=Направление(4), F=Смена(5), G=Уведомление(6), today_idx=сегодня
-        contractors = {}  # {org: {'notified': bool, 'day': val, 'night': val, 'directions': set}}
+        # Группируем по организациям
+        orgs_data = {}  # {org_name: { подано: bool, день: int, ночь: int }}
         
-        for row in headcount_data[1:]:
-            if len(row) < 7:
+        for row in rows:
+            if not row or len(row) <= notification_col_idx:
                 continue
             
-            org = row[3] if len(row) > 3 else ''
-            direction = row[4] if len(row) > 4 else ''
-            shift = row[5] if len(row) > 5 else ''
-            notification = str(row[6]).strip().upper() if len(row) > 6 else 'FALSE'
-            today_val_str = row[today_idx] if today_idx < len(row) else ''
-            
-            if not org:
+            org_name = row[org_col_idx].strip() if org_col_idx < len(row) and row[org_col_idx] else ''
+            if not org_name:
                 continue
             
-            if org not in contractors:
-                contractors[org] = {'notified': False, 'day': 0, 'night': 0, 'directions': set()}
+            # Проверяем флаг мониторинга
+            notif_val = row[notification_col_idx].strip().upper() if notification_col_idx < len(row) and row[notification_col_idx] else 'FALSE'
+            is_monitored = notif_val in ('TRUE', '1', 'ДА', 'YES')
             
-            if notification == 'TRUE':
-                contractors[org]['notified'] = True
+            if not is_monitored:
+                continue  # Пропускаем организации без галочки
             
-            if direction:
-                contractors[org]['directions'].add(direction)
+            # Получаем данные за сегодня
+            today_val = row[today_col_idx].strip() if today_col_idx < len(row) and row[today_col_idx] else ''
             
-            # Парсим числовые значения
-            if today_val_str:
-                try:
-                    val = float(str(today_val_str).replace(',', '.'))
-                    if shift == 'День':
-                        contractors[org]['day'] += val
-                    elif shift == 'Ночь':
-                        contractors[org]['night'] += val
-                except (ValueError, TypeError):
-                    pass
+            shift = ''
+            if shift_col_idx and shift_col_idx < len(row) and row[shift_col_idx]:
+                shift = row[shift_col_idx].strip()
+            
+            # Парсим численность
+            try:
+                day_value = float(today_val.replace(',', '.')) if today_val else 0
+            except (ValueError, AttributeError):
+                day_value = 0
+            
+            if org_name not in orgs_data:
+                orgs_data[org_name] = {'день': 0, 'ночь': 0}
+            
+            if 'ночь' in shift.lower():
+                orgs_data[org_name]['ночь'] += day_value
+            else:
+                orgs_data[org_name]['день'] += day_value
         
         # Формируем сообщение
-        today_formatted = datetime.now().strftime('%d.%m.%Y')
-        message = f"📊 <b>Сводка по численности за {today_formatted}</b>\n\n"
+        message = f"📊 <b>Сводка по численности за {today.strftime('%d.%m.%Y')}</b>\n\n"
         
-        # Группируем
-        notified_with_data = []
-        notified_no_data = []
-        not_notified = []
-        
-        for org, info in contractors.items():
-            total = info['day'] + info['night']
-            dirs = ', '.join(info['directions']) if info['directions'] else ''
-            
-            if info['notified']:
-                if total > 0:
-                    notified_with_data.append((org, info['day'], info['night'], dirs))
-                else:
-                    notified_no_data.append((org, dirs))
-            else:
-                not_notified.append((org, dirs))
-        
-        # Кто подал уведомление и есть данные
-        message += "✅ <b>Подали уведомление:</b>\n"
-        if notified_with_data:
-            for org, day, night, dirs in sorted(notified_with_data):
-                total = day + night
-                if night > 0:
-                    message += f"🔹 {org}: <b>{int(day)}/{int(night)}</b> ({dirs})\n"
-                else:
-                    message += f"🔹 {org}: <b>{int(total)}</b> ({dirs})\n"
+        if not orgs_data:
+            message += "⚠️ Нет организаций с активным мониторингом уведомлений"
         else:
-            message += "Нет данных\n"
+            total_day = sum(d['день'] for d in orgs_data.values())
+            total_night = sum(d['ночь'] for d in orgs_data.values())
+            total = total_day + total_night
+            
+            message += f"📈 <b>Всего: {int(total)} чел.</b> (☀️ {int(total_day)} / 🌙 {int(total_night)})\n\n"
+            
+            for org, data in sorted(orgs_data.items()):
+                day = int(data['день'])
+                night = int(data['ночь'])
+                if day > 0 or night > 0:
+                    message += f"✅ {org}: ☀️{day} / 🌙{night}\n"
+                else:
+                    message += f"❌ {org}: <i>нет данных</i>\n"
         
-        message += "\n"
-        
-        # Кто подал уведомление но нет численности
-        if notified_no_data:
-            message += "⚠️ <b>Подали уведомление, но нет данных:</b>\n"
-            for org, dirs in sorted(notified_no_data):
-                message += f"🔸 {org} ({dirs})\n"
-            message += "\n"
-        
-        # Кто не подал уведомление
-        if not_notified:
-            message += "❌ <b>Не подали уведомление:</b>\n"
-            for org, dirs in sorted(not_notified):
-                message += f"🔴 {org} ({dirs})\n"
-        
-        # Итоги
-        total_day = sum(info['day'] for info in contractors.values())
-        total_night = sum(info['night'] for info in contractors.values())
-        count_notified = len(notified_with_data) + len(notified_no_data)
-        count_not_notified = len(not_notified)
-        
-        message += f"\n📈 <b>Итого:</b> {int(total_day)}/{int(total_night)} чел.\n"
-        message += f"Подали: {count_notified} | Не подали: {count_not_notified}"
+        message += f"\n⏰ {today.strftime('%H:%M')}"
         
         # Отправляем в группу
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        try:
-            loop.run_until_complete(bot.send_message(chat_id=GROUP_CHAT_ID, text=message, parse_mode='HTML'))
-            logger.info(f"Сводка отправлена в группу {GROUP_CHAT_ID}")
-        finally:
-            loop.close()
+        loop.run_until_complete(bot.send_message(chat_id=GROUP_CHAT_ID, text=message, parse_mode='HTML'))
+        loop.close()
+        
+        logger.info(f"✅ Сводка отправлена в группу {GROUP_CHAT_ID}")
         
     except Exception as e:
-        logger.error(f"Ошибка отправки сводки: {e}")
+        logger.error(f"❌ Ошибка отправки сводки: {e}")
 
 
 def setup_scheduler():
-    """Настроить и запустить планировщик"""
+    """Настраивает и запускает планировщик"""
     scheduler = BackgroundScheduler(timezone='Asia/Yekaterinburg')
     
-    # Сводка в 9:00, 9:30 и 10:00 по Екатеринбургу
-    for minute in ['00', '30']:
+    # Сводка в 9:00, 9:30, 10:00
+    for hour, minute in [(9, 0), (9, 30), (10, 0)]:
         scheduler.add_job(
-            send_headcount_summary,
-            CronTrigger(hour=9, minute=minute, timezone='Asia/Yekaterinburg'),
-            id=f'headcount_summary_9_{minute}',
+            should_send_reminder,
+            CronTrigger(hour=hour, minute=minute, timezone='Asia/Yekaterinburg'),
+            id=f'headcount_summary_{hour}_{minute}',
             replace_existing=True
         )
-    
-    scheduler.add_job(
-        send_headcount_summary,
-        CronTrigger(hour=10, minute='00', timezone='Asia/Yekaterinburg'),
-        id='headcount_summary_10_00',
-        replace_existing=True
-    )
     
     scheduler.start()
     logger.info("✅ Scheduler запущен: сводка в 9:00, 9:30, 10:00")
