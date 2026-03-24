@@ -17,6 +17,7 @@ from config import TELEGRAM_BOT_TOKEN, validate_config
 from logger import logger, log_to_sheet
 from utils.state_manager import state_manager
 from utils.auth import auth_service
+from utils.scheduler import setup_scheduler, set_group_chat_id
 
 # Импорт обработчиков (будут созданы далее)
 from handlers import main_menu, headcount, tasks, questions, weather, psd_log, nsg
@@ -41,6 +42,10 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     """Обработчик текстовых сообщений"""
     chat_id = update.effective_chat.id
     text = update.message.text
+    
+    # Определяем группу для отправки сводок
+    if update.effective_chat.type in ['group', 'supergroup']:
+        set_group_chat_id(update.effective_chat.id)
     
     logger.debug(f"Text message from {chat_id}: {text}")
     
@@ -240,6 +245,15 @@ def main():
         
         logger.info("✅ Бот успешно запущен и готов к работе!")
         logger.info("Нажмите Ctrl+C для остановки")
+        
+        # Запуск scheduler в отдельном потоке
+        import threading
+        def run_scheduler():
+            scheduler = setup_scheduler()
+        
+        scheduler_thread = threading.Thread(target=run_scheduler, daemon=True)
+        scheduler_thread.start()
+        logger.info("✅ Scheduler запущен в фоновом потоке")
         
         # Запуск бота
         application.run_polling(allowed_updates=Update.ALL_TYPES)

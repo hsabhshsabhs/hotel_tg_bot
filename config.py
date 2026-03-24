@@ -48,6 +48,11 @@ REMINDER_NIGHT_ENGINEERS = '21:00'
 ROLE_ENGINEER = 'ИНЖЕНЕР'
 ROLE_CONTRACTOR = 'ПОДРЯДЧИК'
 
+# =================================================================
+# SCHEDULER
+# =================================================================
+HEADCOUNT_SUMMARY_TIMES = os.getenv('HEADCOUNT_SUMMARY_TIMES', '09:00,09:30,10:00')
+
 def validate_config():
     """Проверка наличия обязательных параметров конфигурации"""
     errors = []
