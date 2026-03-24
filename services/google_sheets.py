@@ -33,18 +33,27 @@ class GoogleSheetsService:
         """Аутентификация в Google API через Service Account или ADC"""
         creds = None
         
-        creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS') or GOOGLE_CREDENTIALS_FILE
+        # Render stores secret files at /etc/secrets/<filename>
+        possible_paths = ['/etc/secrets/service_account.json']
+        if os.environ.get('GOOGLE_APPLICATION_CREDENTIALS'):
+            possible_paths.insert(0, os.environ['GOOGLE_APPLICATION_CREDENTIALS'])
+        possible_paths.append(GOOGLE_CREDENTIALS_FILE)
         
-        if os.path.exists(creds_path):
-            try:
-                from google.oauth2 import service_account
-                creds = service_account.Credentials.from_service_account_file(
-                    creds_path, scopes=SCOPES
-                )
-                logger.info("✅ Google Sheets: Service Account авторизация успешна")
-            except Exception as e:
-                logger.warning(f"Не удалось загрузить Service Account: {e}")
-                creds = None
+        for creds_path in possible_paths:
+            if os.path.exists(creds_path):
+                try:
+                    from google.oauth2 import service_account
+                    creds = service_account.Credentials.from_service_account_file(
+                        creds_path, scopes=SCOPES
+                    )
+                    logger.info("✅ Google Sheets: Service Account авторизация успешна")
+                    break
+                except Exception as e:
+                    logger.warning(f"Не удалось загрузить Service Account: {e}")
+                    creds = None
+                    continue
+            if creds:
+                break
         
         if not creds:
             try:
