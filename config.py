@@ -18,6 +18,7 @@ GOOGLE_TOKEN_FILE = os.getenv('GOOGLE_TOKEN_FILE', 'credentials/token.json')
 SHEET_NAMES = {
     'COMPLEX_QUESTIONS': os.getenv('SHEET_NAME_COMPLEX_QUESTIONS', 'Вопросы к комплексу'),
     'HEADCOUNT': os.getenv('SHEET_NAME_HEADCOUNT', 'Численность'),
+    'HEADCOUNT_EXTENDED': os.getenv('SHEET_NAME_HEADCOUNT_EXTENDED', 'Численность расширенная'),
     'TASKS': os.getenv('SHEET_NAME_TASKS', 'Целевые задания'),
     'ACCESS': os.getenv('SHEET_NAME_ACCESS', 'Доступ'),
     'QUESTIONS': os.getenv('SHEET_NAME_QUESTIONS', 'Вопросы к заказчику'),

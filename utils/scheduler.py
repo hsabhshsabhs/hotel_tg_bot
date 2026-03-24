@@ -2,187 +2,165 @@
 Планировщик задач для отправки сводок в группу
 """
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 from telegram import Bot
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from config import TELEGRAM_BOT_TOKEN, SHEET_NAMES
+from config import TELEGRAM_BOT_TOKEN, GROUP_CHAT_ID, SHEET_NAMES
 from services.google_sheets import GoogleSheetsService
 from logger import logger
 
-# ID группы для отправки сводок (задается автоматически или вручную)
-# Используем известный ID группы
-GROUP_CHAT_ID = -3486618308
 
-
-def set_group_chat_id(chat_id: int):
-    """Установить ID группы для отправки сводок"""
-    global GROUP_CHAT_ID
-    GROUP_CHAT_ID = chat_id
-    logger.info(f"✅ GROUP_CHAT_ID установлен: {chat_id}")
-
-
-async def send_headcount_summary_to_group():
+def send_headcount_summary():
     """Отправить сводку по численности в группу"""
-    if not GROUP_CHAT_ID:
-        logger.warning("GROUP_CHAT_ID не установлен, сводка не отправлена")
-        return
-    
-    try:
-        bot = Bot(token=TELEGRAM_BOT_TOKEN)
-        
-        # Формируем текст сводки
-        message = await build_headcount_summary_message()
-        
-        await bot.send_message(
-            chat_id=GROUP_CHAT_ID,
-            text=message,
-            parse_mode='HTML'
-        )
-        logger.info(f"✅ Сводка отправлена в группу {GROUP_CHAT_ID}")
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки сводки в группу: {e}")
-
-
-async def build_headcount_summary_message() -> str:
-    """Построить сообщение со сводкой по численности"""
     try:
         sheets_service = GoogleSheetsService()
-        headcount_data = sheets_service.get_values(SHEET_NAMES['HEADCOUNT'])
         
-        if not headcount_data or len(headcount_data) < 4:
-            return "❌ Не удалось получить данные из таблицы численности"
+        # Читаем из "Численность расширенная" - там есть колонка Уведомление
+        headcount_data = sheets_service.get_values(SHEET_NAMES.get('HEADCOUNT_EXTENDED', 'Численность расширенная'))
         
-        headers = headcount_data[:3]
-        rows = headcount_data[3:]
+        if not headcount_data or len(headcount_data) < 2:
+            logger.warning("Нет данных в листе Численность расширенная")
+            return
         
-        today = datetime.now()
-        today_string = today.strftime('%d.%m.%Y')
+        # Ищем колонку с сегодняшней датой
+        header = headcount_data[0]
+        today = datetime.now().strftime('%d.%m.%Y')
         
-        # Ищем строки за сегодня и за вчера
-        today_row = None
-        yesterday_row = None
+        today_idx = None
+        for i, val in enumerate(header):
+            if str(val).strip() == today:
+                today_idx = i
+                break
         
-        yesterday = today - timedelta(days=1)
-        yesterday_string = yesterday.strftime('%d.%m.%Y')
-        
-        for row in rows:
-            if len(row) == 0 or not row[0]:
-                continue
-            
-            date_str = str(row[0]).strip()
-            try:
-                if len(date_str.split('.')[2]) == 2:
-                    row_date = datetime.strptime(date_str, '%d.%m.%y')
-                else:
-                    row_date = datetime.strptime(date_str, '%d.%m.%Y')
-                
-                if row_date.strftime('%d.%m.%Y') == today_string:
-                    today_row = row
-                elif row_date.strftime('%d.%m.%Y') == yesterday_string:
-                    yesterday_row = row
-            except ValueError:
-                continue
-        
-        def calc_totals(row):
-            if not row:
-                return 0, 0
-            day_total = 0
-            night_total = 0
-            for i in range(1, len(row)):
-                if i >= len(headers[2]):
-                    continue
-                shift = headers[2][i]
-                try:
-                    value = float(str(row[i]).replace(',', '.')) if row[i] else 0
-                    if shift == 'День':
-                        day_total += value
-                    elif shift == 'Ночь':
-                        night_total += value
-                except (ValueError, TypeError):
-                    continue
-            return day_total, night_total
-        
-        today_day, today_night = calc_totals(today_row)
-        yesterday_day, yesterday_night = calc_totals(yesterday_row)
-        
-        today_total = today_day + today_night
-        yesterday_total = yesterday_day + yesterday_night
-        
-        # Считаем динамику
-        if yesterday_total > 0:
-            delta = today_total - yesterday_total
-            delta_str = f"({delta:+.0f})" if delta != 0 else "(0)"
-        else:
-            delta_str = ""
+        if today_idx is None:
+            logger.warning(f"Сегодняшняя дата {today} не найдена в заголовках")
+            return
         
         # Собираем данные по организациям
-        contractors = {}
-        if today_row:
-            for i in range(1, len(today_row)):
-                if i >= len(headers[0]):
-                    continue
-                org_name = headers[0][i]
-                if not org_name:
-                    continue
-                
-                shift = headers[2][i] if i < len(headers[2]) else ""
-                
+        # Колонки: D=Подрядчик(3), E=Направление(4), F=Смена(5), G=Уведомление(6), today_idx=сегодня
+        contractors = {}  # {org: {'notified': bool, 'day': val, 'night': val, 'directions': set}}
+        
+        for row in headcount_data[1:]:
+            if len(row) < 7:
+                continue
+            
+            org = row[3] if len(row) > 3 else ''
+            direction = row[4] if len(row) > 4 else ''
+            shift = row[5] if len(row) > 5 else ''
+            notification = str(row[6]).strip().upper() if len(row) > 6 else 'FALSE'
+            today_val_str = row[today_idx] if today_idx < len(row) else ''
+            
+            if not org:
+                continue
+            
+            if org not in contractors:
+                contractors[org] = {'notified': False, 'day': 0, 'night': 0, 'directions': set()}
+            
+            if notification == 'TRUE':
+                contractors[org]['notified'] = True
+            
+            if direction:
+                contractors[org]['directions'].add(direction)
+            
+            # Парсим числовые значения
+            if today_val_str:
                 try:
-                    value = float(str(today_row[i]).replace(',', '.')) if today_row[i] else 0
+                    val = float(str(today_val_str).replace(',', '.'))
+                    if shift == 'День':
+                        contractors[org]['day'] += val
+                    elif shift == 'Ночь':
+                        contractors[org]['night'] += val
                 except (ValueError, TypeError):
-                    value = 0
-                
-                if org_name not in contractors:
-                    contractors[org_name] = {'day': 0, 'night': 0}
-                if shift == 'День':
-                    contractors[org_name]['day'] += value
-                elif shift == 'Ночь':
-                    contractors[org_name]['night'] += value
+                    pass
         
         # Формируем сообщение
-        message = f"📊 <b>СВОДКА ПО ЧИСЛЕННОСТИ</b>\n"
-        message += f"🗓 {today_string}\n\n"
+        today_formatted = datetime.now().strftime('%d.%m.%Y')
+        message = f"📊 <b>Сводка по численности за {today_formatted}</b>\n\n"
         
-        message += f"<b>Сегодня:</b>\n"
-        message += f"☀️ День: {today_day:.0f}\n"
-        message += f"🌙 Ночь: {today_night:.0f}\n"
-        message += f"📈 Всего: {today_total:.0f} {delta_str}\n\n"
+        # Группируем
+        notified_with_data = []
+        notified_no_data = []
+        not_notified = []
         
-        if contractors:
-            message += "<b>По организациям:</b>\n"
-            for org, counts in sorted(contractors.items()):
-                if counts['day'] > 0 or counts['night'] > 0:
-                    message += f"🔹 {org}: {counts['day']:.0f}/{counts['night']:.0f}\n"
+        for org, info in contractors.items():
+            total = info['day'] + info['night']
+            dirs = ', '.join(info['directions']) if info['directions'] else ''
+            
+            if info['notified']:
+                if total > 0:
+                    notified_with_data.append((org, info['day'], info['night'], dirs))
+                else:
+                    notified_no_data.append((org, dirs))
+            else:
+                not_notified.append((org, dirs))
+        
+        # Кто подал уведомление и есть данные
+        message += "✅ <b>Подали уведомление:</b>\n"
+        if notified_with_data:
+            for org, day, night, dirs in sorted(notified_with_data):
+                total = day + night
+                if night > 0:
+                    message += f"🔹 {org}: <b>{int(day)}/{int(night)}</b> ({dirs})\n"
+                else:
+                    message += f"🔹 {org}: <b>{int(total)}</b> ({dirs})\n"
         else:
-            message += "<b>Данные по организациям отсутствуют</b>\n"
+            message += "Нет данных\n"
         
-        message += f"\n⏰ Время проверки: {today.strftime('%H:%M')}"
+        message += "\n"
         
-        return message
+        # Кто подал уведомление но нет численности
+        if notified_no_data:
+            message += "⚠️ <b>Подали уведомление, но нет данных:</b>\n"
+            for org, dirs in sorted(notified_no_data):
+                message += f"🔸 {org} ({dirs})\n"
+            message += "\n"
+        
+        # Кто не подал уведомление
+        if not_notified:
+            message += "❌ <b>Не подали уведомление:</b>\n"
+            for org, dirs in sorted(not_notified):
+                message += f"🔴 {org} ({dirs})\n"
+        
+        # Итоги
+        total_day = sum(info['day'] for info in contractors.values())
+        total_night = sum(info['night'] for info in contractors.values())
+        count_notified = len(notified_with_data) + len(notified_no_data)
+        count_not_notified = len(not_notified)
+        
+        message += f"\n📈 <b>Итого:</b> {int(total_day)}/{int(total_night)} чел.\n"
+        message += f"Подали: {count_notified} | Не подали: {count_not_notified}"
+        
+        # Отправляем в группу
+        bot = Bot(token=TELEGRAM_BOT_TOKEN)
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(bot.send_message(chat_id=GROUP_CHAT_ID, text=message, parse_mode='HTML'))
+            logger.info(f"Сводка отправлена в группу {GROUP_CHAT_ID}")
+        finally:
+            loop.close()
         
     except Exception as e:
-        logger.error(f"Ошибка построения сводки: {e}")
-        return f"❌ Ошибка формирования сводки: {e}"
+        logger.error(f"Ошибка отправки сводки: {e}")
 
 
 def setup_scheduler():
     """Настроить и запустить планировщик"""
-    scheduler = BackgroundScheduler()
+    scheduler = BackgroundScheduler(timezone='Asia/Yekaterinburg')
     
-    # Отправка сводки в 9:00, 9:30 и 10:00
+    # Сводка в 9:00, 9:30 и 10:00 по Екатеринбургу
     for minute in ['00', '30']:
         scheduler.add_job(
-            lambda: asyncio.run(send_headcount_summary_to_group()),
+            send_headcount_summary,
             CronTrigger(hour=9, minute=minute, timezone='Asia/Yekaterinburg'),
             id=f'headcount_summary_9_{minute}',
             replace_existing=True
         )
     
     scheduler.add_job(
-        lambda: asyncio.run(send_headcount_summary_to_group()),
+        send_headcount_summary,
         CronTrigger(hour=10, minute='00', timezone='Asia/Yekaterinburg'),
         id='headcount_summary_10_00',
         replace_existing=True
