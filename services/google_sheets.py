@@ -71,7 +71,7 @@ class GoogleSheetsService:
             logger.error(f"Ошибка подключения к Google Sheets: {error}")
             self.service = None
     
-    def get_values(self, sheet_name, range_notation='A:Z'):
+    def get_values(self, sheet_name, range_notation='A:ZZ'):
         """Получить значения из листа"""
         if not self.service:
             logger.warning(f"Google Sheets отключён, get_values пропущен")
