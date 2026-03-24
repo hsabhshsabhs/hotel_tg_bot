@@ -4,7 +4,7 @@
 import asyncio
 from datetime import datetime, timedelta
 from telegram import Bot
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from config import TELEGRAM_BOT_TOKEN, SHEET_NAMES
@@ -170,19 +170,19 @@ async def build_headcount_summary_message() -> str:
 
 def setup_scheduler():
     """Настроить и запустить планировщик"""
-    scheduler = AsyncIOScheduler()
+    scheduler = BackgroundScheduler()
     
     # Отправка сводки в 9:00, 9:30 и 10:00
     for minute in ['00', '30']:
         scheduler.add_job(
-            send_headcount_summary_to_group,
+            lambda: asyncio.run(send_headcount_summary_to_group()),
             CronTrigger(hour=9, minute=minute, timezone='Asia/Yekaterinburg'),
             id=f'headcount_summary_9_{minute}',
             replace_existing=True
         )
     
     scheduler.add_job(
-        send_headcount_summary_to_group,
+        lambda: asyncio.run(send_headcount_summary_to_group()),
         CronTrigger(hour=10, minute='00', timezone='Asia/Yekaterinburg'),
         id='headcount_summary_10_00',
         replace_existing=True
