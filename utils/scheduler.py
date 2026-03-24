@@ -11,8 +11,9 @@ from config import TELEGRAM_BOT_TOKEN, SHEET_NAMES
 from services.google_sheets import GoogleSheetsService
 from logger import logger
 
-# ID группы для отправки сводок (устанавливается через переменную окружения)
-GROUP_CHAT_ID = None  # Будет установлен при первом запуске бота в группе
+# ID группы для отправки сводок (задается автоматически или вручную)
+# Используем известный ID группы
+GROUP_CHAT_ID = -3486618308
 
 
 def set_group_chat_id(chat_id: int):
