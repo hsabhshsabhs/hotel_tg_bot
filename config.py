@@ -91,8 +91,9 @@ def validate_config():
     if not OPENWEATHER_API_KEY:
         errors.append("OPENWEATHER_API_KEY не установлен (требуется для модуля погоды)")
     
-    if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
-        errors.append(f"Файл {GOOGLE_CREDENTIALS_FILE} не найден. Следуйте инструкции в credentials/README.md")
+    # Google Sheets credentials - опционально, бот запустится и без них
+    # if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
+    #     errors.append(f"Файл {GOOGLE_CREDENTIALS_FILE} не найден. Google Sheets будут отключены.")
     
     if errors:
         error_msg = "\n".join(f"  - {err}" for err in errors)

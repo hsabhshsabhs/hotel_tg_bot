@@ -37,8 +37,16 @@ class GoogleSheetsService:
         
         # Загрузка сохраненных учетных данных
         if os.path.exists(GOOGLE_TOKEN_FILE):
-            with open(GOOGLE_TOKEN_FILE, 'rb') as token:
-                creds = pickle.load(token)
+            try:
+                with open(GOOGLE_TOKEN_FILE, 'rb') as token:
+                    creds = pickle.load(token)
+            except Exception as e:
+                logger.warning(f"Не удалось загрузить token.pickle: {e}. Удаляю битый файл.")
+                try:
+                    os.remove(GOOGLE_TOKEN_FILE)
+                except:
+                    pass
+                creds = None
         
         # Если нет валидных учетных данных, запрашиваем авторизацию
         if not creds or not creds.valid:
@@ -51,22 +59,33 @@ class GoogleSheetsService:
                     creds = None
             
             if not creds or not creds.valid:
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    GOOGLE_CREDENTIALS_FILE, SCOPES
-                )
-                creds = flow.run_local_server(port=0)
+                if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
+                    logger.warning(f"Файл {GOOGLE_CREDENTIALS_FILE} не найден. Google Sheets отключен.")
+                    self.service = None
+                    return
+                try:
+                    flow = InstalledAppFlow.from_client_secrets_file(
+                        GOOGLE_CREDENTIALS_FILE, SCOPES
+                    )
+                    creds = flow.run_local_server(port=0)
+                except Exception as e:
+                    logger.warning(f"Не удалось пройти авторизацию Google: {e}. Google Sheets отключен.")
+                    self.service = None
+                    return
             
-            # Сохранение учетных данных для следующего запуска
-            with open(GOOGLE_TOKEN_FILE, 'wb') as token:
-                pickle.dump(creds, token)
-            logger.info("Токен Google API сохранен")
+            try:
+                with open(GOOGLE_TOKEN_FILE, 'wb') as token:
+                    pickle.dump(creds, token)
+                logger.info("Токен Google API сохранен")
+            except Exception as e:
+                logger.warning(f"Не удалось сохранить токен: {e}")
         
         try:
             self.service = build('sheets', 'v4', credentials=creds)
             logger.info("✅ Подключение к Google Sheets успешно")
         except HttpError as error:
             logger.error(f"Ошибка подключения к Google Sheets: {error}")
-            raise
+            self.service = None
     
     def get_values(self, sheet_name, range_notation='A:Z'):
         """
@@ -79,6 +98,9 @@ class GoogleSheetsService:
         Returns:
             list: Список строк с данными
         """
+        if self.service is None:
+            logger.warning(f"Google Sheets отключен. Возвращаю пустой список для {sheet_name}.")
+            return []
         try:
             range_name = f"{sheet_name}!{range_notation}"
             result = self.service.spreadsheets().values().get(
