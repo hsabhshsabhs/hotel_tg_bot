@@ -36,8 +36,16 @@ class GoogleDriveService:
         creds = None
         
         if os.path.exists(GOOGLE_TOKEN_FILE):
-            with open(GOOGLE_TOKEN_FILE, 'rb') as token:
-                creds = pickle.load(token)
+            try:
+                with open(GOOGLE_TOKEN_FILE, 'rb') as token:
+                    creds = pickle.load(token)
+            except Exception as e:
+                logger.warning(f"Не удалось загрузить token.pickle: {e}. Удаляю битый файл.")
+                try:
+                    os.remove(GOOGLE_TOKEN_FILE)
+                except:
+                    pass
+                creds = None
         
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
@@ -49,20 +57,26 @@ class GoogleDriveService:
                     creds = None
             
             if not creds or not creds.valid:
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    GOOGLE_CREDENTIALS_FILE, SCOPES
-                )
-                creds = flow.run_local_server(port=0)
-            
-            with open(GOOGLE_TOKEN_FILE, 'wb') as token:
-                pickle.dump(creds, token)
+                if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
+                    logger.warning("credentials.json не найден. Google Drive отключён.")
+                    return
+                try:
+                    flow = InstalledAppFlow.from_client_secrets_file(
+                        GOOGLE_CREDENTIALS_FILE, SCOPES
+                    )
+                    creds = flow.run_local_server(port=0)
+                    with open(GOOGLE_TOKEN_FILE, 'wb') as token:
+                        pickle.dump(creds, token)
+                except Exception as e:
+                    logger.warning(f"Не удалось пройти авторизацию Google: {e}. Google Drive отключён.")
+                    return
         
         try:
             self.service = build('drive', 'v3', credentials=creds)
             logger.info("✅ Подключение к Google Drive успешно")
         except HttpError as error:
             logger.error(f"Ошибка подключения к Google Drive: {error}")
-            raise
+            self.service = None
     
     def upload_photo(self, photo_bytes, filename):
         """
@@ -75,6 +89,10 @@ class GoogleDriveService:
         Returns:
             str: URL для просмотра файла или None при ошибке
         """
+        if not self.service:
+            logger.warning("Google Drive отключён, фото не загружено")
+            return None
+        
         try:
             # Создаем медиа-объект из байтов
             media = MediaIoBaseUpload(
@@ -124,6 +142,10 @@ class GoogleDriveService:
         Args:
             file_id: ID файла
         """
+        if not self.service:
+            logger.warning("Google Drive отключён, файл не удален")
+            return
+        
         try:
             self.service.files().delete(fileId=file_id).execute()
             logger.info(f"Файл {file_id} удален из Drive")
