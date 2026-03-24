@@ -2,7 +2,7 @@
 Сервис для работы с Google Sheets API
 """
 import os
-import pickle
+from google.auth import default
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -12,11 +12,9 @@ from googleapiclient.errors import HttpError
 from config import (
     GOOGLE_SPREADSHEET_ID,
     GOOGLE_CREDENTIALS_FILE,
-    GOOGLE_TOKEN_FILE
 )
 from logger import logger
 
-# Области доступа для Google Sheets API
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
     'https://www.googleapis.com/auth/drive.file'
@@ -32,53 +30,30 @@ class GoogleSheetsService:
         self._authenticate()
     
     def _authenticate(self):
-        """Аутентификация в Google API"""
+        """Аутентификация в Google API через Service Account или ADC"""
         creds = None
         
-        # Загрузка сохраненных учетных данных
-        if os.path.exists(GOOGLE_TOKEN_FILE):
+        creds_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS') or GOOGLE_CREDENTIALS_FILE
+        
+        if os.path.exists(creds_path):
             try:
-                with open(GOOGLE_TOKEN_FILE, 'rb') as token:
-                    creds = pickle.load(token)
+                from google.oauth2 import service_account
+                creds = service_account.Credentials.from_service_account_file(
+                    creds_path, scopes=SCOPES
+                )
+                logger.info("✅ Google Sheets: Service Account авторизация успешна")
             except Exception as e:
-                logger.warning(f"Не удалось загрузить token.pickle: {e}. Удаляю битый файл.")
-                try:
-                    os.remove(GOOGLE_TOKEN_FILE)
-                except:
-                    pass
+                logger.warning(f"Не удалось загрузить Service Account: {e}")
                 creds = None
         
-        # Если нет валидных учетных данных, запрашиваем авторизацию
-        if not creds or not creds.valid:
-            if creds and creds.expired and creds.refresh_token:
-                try:
-                    logger.info("Обновление токена Google API...")
-                    creds.refresh(Request())
-                except Exception as e:
-                    logger.warning(f"Ошибка при обновлении токена: {e}. Требуется повторная авторизация.")
-                    creds = None
-            
-            if not creds or not creds.valid:
-                if not os.path.exists(GOOGLE_CREDENTIALS_FILE):
-                    logger.warning(f"Файл {GOOGLE_CREDENTIALS_FILE} не найден. Google Sheets отключен.")
-                    self.service = None
-                    return
-                try:
-                    flow = InstalledAppFlow.from_client_secrets_file(
-                        GOOGLE_CREDENTIALS_FILE, SCOPES
-                    )
-                    creds = flow.run_local_server(port=0)
-                except Exception as e:
-                    logger.warning(f"Не удалось пройти авторизацию Google: {e}. Google Sheets отключен.")
-                    self.service = None
-                    return
-            
+        if not creds:
             try:
-                with open(GOOGLE_TOKEN_FILE, 'wb') as token:
-                    pickle.dump(creds, token)
-                logger.info("Токен Google API сохранен")
+                creds, _ = default(scopes=SCOPES)
+                logger.info("✅ Google Sheets: ADC авторизация успешна")
             except Exception as e:
-                logger.warning(f"Не удалось сохранить токен: {e}")
+                logger.warning(f"Не удалось пройти авторизацию Google: {e}. Google Sheets отключён.")
+                self.service = None
+                return
         
         try:
             self.service = build('sheets', 'v4', credentials=creds)
@@ -88,19 +63,11 @@ class GoogleSheetsService:
             self.service = None
     
     def get_values(self, sheet_name, range_notation='A:Z'):
-        """
-        Получить значения из листа
-        
-        Args:
-            sheet_name: Название листа
-            range_notation: Диапазон ячеек (например, 'A:Z' или 'A1:D10')
-            
-        Returns:
-            list: Список строк с данными
-        """
-        if self.service is None:
-            logger.warning(f"Google Sheets отключен. Возвращаю пустой список для {sheet_name}.")
+        """Получить значения из листа"""
+        if not self.service:
+            logger.warning(f"Google Sheets отключён, get_values пропущен")
             return []
+        
         try:
             range_name = f"{sheet_name}!{range_notation}"
             result = self.service.spreadsheets().values().get(
@@ -117,14 +84,11 @@ class GoogleSheetsService:
             return []
     
     def update_cell(self, sheet_name, cell, value):
-        """
-        Обновить значение одной ячейки
+        """Обновить значение одной ячейки"""
+        if not self.service:
+            logger.warning(f"Google Sheets отключён, update_cell пропущен")
+            return
         
-        Args:
-            sheet_name: Название листа
-            cell: Адрес ячейки (например, 'A1')
-            value: Новое значение
-        """
         try:
             range_name = f"{sheet_name}!{cell}"
             body = {'values': [[value]]}
@@ -143,14 +107,11 @@ class GoogleSheetsService:
             raise
     
     def update_range(self, sheet_name, range_notation, values):
-        """
-        Обновить диапазон ячеек
+        """Обновить диапазон ячеек"""
+        if not self.service:
+            logger.warning(f"Google Sheets отключён, update_range пропущен")
+            return
         
-        Args:
-            sheet_name: Название листа
-            range_notation: Диапазон (например, 'A1:D5')
-            values: Двумерный массив значений
-        """
         try:
             range_name = f"{sheet_name}!{range_notation}"
             body = {'values': values}
@@ -169,13 +130,11 @@ class GoogleSheetsService:
             raise
     
     def append_row(self, sheet_name, values):
-        """
-        Добавить строку в конец листа
+        """Добавить строку в конец листа"""
+        if not self.service:
+            logger.warning(f"Google Sheets отключён, append_row пропущен")
+            return
         
-        Args:
-            sheet_name: Название листа
-            values: Список значений для новой строки
-        """
         try:
             range_name = f"{sheet_name}!A:Z"
             body = {'values': [values]}
@@ -195,17 +154,7 @@ class GoogleSheetsService:
             raise
     
     def find_row_by_value(self, sheet_name, column_index, search_value):
-        """
-        Найти строку по значению в определенной колонке
-        
-        Args:
-            sheet_name: Название листа
-            column_index: Индекс колонки (0-based)
-            search_value: Искомое значение
-            
-        Returns:
-            tuple: (row_index, row_data) или (None, None) если не найдено
-        """
+        """Найти строку по значению в определенной колонке"""
         values = self.get_values(sheet_name)
         
         for i, row in enumerate(values):
@@ -216,6 +165,9 @@ class GoogleSheetsService:
     
     def get_spreadsheet_timezone(self):
         """Получить часовой пояс таблицы"""
+        if not self.service:
+            return 'UTC'
+        
         try:
             spreadsheet = self.service.spreadsheets().get(
                 spreadsheetId=self.spreadsheet_id
@@ -230,7 +182,6 @@ class GoogleSheetsService:
 
 
 if __name__ == '__main__':
-    # Тест подключения
     try:
         sheets = GoogleSheetsService()
         timezone = sheets.get_spreadsheet_timezone()
